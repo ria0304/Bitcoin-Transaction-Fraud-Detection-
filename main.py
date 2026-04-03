@@ -1,5 +1,4 @@
 import os
-
 import random
 import numpy as np
 import pandas as pd
@@ -16,8 +15,8 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.neural_network import MLPClassifier
 from scipy.stats import wilcoxon
 from torch_geometric.data import Data
-from torch_geometric.nn import GATConv, GCNConv, SAGEConv
-from torch_geometric.utils import to_undirected, add_self_loops
+from torch_geometric.nn import GATConv, SAGEConv
+from torch_geometric.utils import to_undirected
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -37,23 +36,25 @@ except ImportError:
 # ========================
 # CONFIGURATION
 # ========================
-SEEDS         = [42, 123, 2024,1 7, 99]                     # list of integer seeds used for reproducible runs
-HIDDEN_DIM    = 128                                             #Hidden dimension size for the GNN layers
-NUM_LAYERS    = 3                                               #Number of graph convolution layers 
-LEARNING_RATE = 0.001                                     # Initial learning rate for the AdamW optimiser.
-EPOCHS        = 200                                                  #Maximum number of training epochs.
-PATIENCE      = 20                                                  #Early stopping patience – if validation AUC does not improve for 20 epochs, training stops.
-MC_SAMPLES    = 30                                             #Number of forward passes with dropout enabled to estimate uncertainty (Monte Carlo dropout).
-DROPOUT       = 0.3                                                
-DATASET       = 'elliptic'
+SEEDS         = [42, 123, 2024, 17, 99]                     # Reproducible seeds
+HIDDEN_DIM    = 128                                          # Hidden dimension for GNN layers
+NUM_LAYERS    = 3                                            # Number of GAT layers
+LEARNING_RATE = 0.001                                        # Initial learning rate
+EPOCHS        = 200                                          # Maximum training epochs
+PATIENCE      = 20                                           # Early stopping patience
+MC_SAMPLES    = 30                                           # Monte Carlo dropout samples
+DROPOUT       = 0.3                                          # Dropout rate
+DATASET       = 'elliptic'                                   # Elliptic Bitcoin dataset
 
-PROJECT_DATA_PATH = r"C:\\Users\\Ria S\\OneDrive\\Attachments\\Desktop\\projects\\CREDIT CARD DETECTION\\data"
+# Paths (update these to your system)
+PROJECT_DATA_PATH = r"C:\\Users\\Ria S\\OneDrive\\Attachments\\Desktop\\projects\\BITCOIN_FRAUD_DETECTION\\data"
 ELLIPTIC_PATH = r"C:\\Users\\Ria S\\.cache\\kagglehub\\datasets\\ellipticco\\elliptic-data-set\\versions\\1"
 
 # ========================
 # DATASET DISCOVERY
 # ========================
 def ensure_dataset(dataset_name):
+    """Download Elliptic Bitcoin dataset using KaggleHub if not present."""
     if not HAS_KAGGLEHUB:
         return None
     try:
@@ -64,6 +65,7 @@ def ensure_dataset(dataset_name):
     return None
 
 def find_dataset_path(dataset_name):
+    """Locate Elliptic dataset in local paths or download."""
     project_path = os.path.join(PROJECT_DATA_PATH, dataset_name)
     if os.path.exists(project_path):
         return project_path
@@ -84,9 +86,13 @@ def find_dataset_path(dataset_name):
     return ensure_dataset(dataset_name)
 
 # ========================
-# ELLIPTIC DATASET LOADER
+# ELLIPTIC BITCOIN DATASET LOADER
 # ========================
 def load_elliptic(path):
+    """
+    Load Elliptic Bitcoin transaction dataset.
+    Returns labelled transactions, full feature matrix, edge indices, and mappings.
+    """
     feats_path   = os.path.join(path, 'elliptic_txs_features.csv')
     classes_path = os.path.join(path, 'elliptic_txs_classes.csv')
     edges_path   = os.path.join(path, 'elliptic_txs_edgelist.csv')
@@ -97,98 +103,99 @@ def load_elliptic(path):
     feats   = pd.read_csv(feats_path, header=None)
     classes = pd.read_csv(classes_path)
 
-    feat_cols = ['txId', 'timestep'] + [f'f{i}' for i in range(feats.shape[1] - 2)]           #column names to the raw features DataFrame
+    feat_cols = ['txId', 'timestep'] + [f'f{i}' for i in range(feats.shape[1] - 2)]
     feats.columns = feat_cols
     classes['class'] = classes['class'].map({'1': 1, '2': 0, 'unknown': np.nan})
 
-    # Merges the features DataFrame with the classes DataFrame on txId using a left join.
-    #This ensures all transactions (even those without a label) are kept.
+    # Merge features and classes (keep unknown transactions)
     all_nodes = feats.merge(classes, on='txId', how='left')
     all_nodes = all_nodes.rename(columns={'class': 'isFraud'})
 
-    # Build a txId → contiguous index map over ALL nodes
+    # Map transaction IDs to contiguous indices for PyG
     txid_to_idx = {tid: i for i, tid in enumerate(all_nodes['txId'])}
 
-    # Build edge_index over ALL nodes (for full message passing)
+    # Build undirected edge index for the full Bitcoin transaction graph
     full_edge_index = None
     if os.path.exists(edges_path):
         el = pd.read_csv(edges_path, header=None)
         el.columns = ['txId1', 'txId2']
-        # Keep only edges where both endpoints are in our node set
         mask = el['txId1'].isin(txid_to_idx) & el['txId2'].isin(txid_to_idx)
         el   = el[mask]
         src  = torch.tensor([txid_to_idx[t] for t in el['txId1']], dtype=torch.long)
         dst  = torch.tensor([txid_to_idx[t] for t in el['txId2']], dtype=torch.long)
         full_edge_index = torch.stack([src, dst], dim=0)
-        full_edge_index = to_undirected(full_edge_index)   # undirected for GCN/GAT
+        full_edge_index = to_undirected(full_edge_index)
         print(f"  Loaded edgelist: {el.shape[0]} directed → "
               f"{full_edge_index.shape[1]} undirected edges")
 
-    # Raw feature matrix (all nodes)
+    # Raw feature matrix (166 features per transaction)
     raw_feat_cols = [c for c in feat_cols if c.startswith('f')]
     X_all = all_nodes[raw_feat_cols].values.astype(np.float32)
 
-    # Labelled-only df (for supervised training)
+    # Labelled transactions only (for supervised training)
     labelled = all_nodes.dropna(subset=['isFraud']).copy()
     labelled['isFraud'] = labelled['isFraud'].astype(int)
 
-    # Synthesise Card_ID / Merchant_City / Timestamp for velocity features
-    labelled['Card_ID']       = labelled['timestep'].astype(str)
-    labelled['Merchant_City'] = (labelled['txId'] % 500).astype(str)
+    # Create proxy wallet identifiers for velocity feature computation
+    # Note: Elliptic dataset doesn't have real wallet IDs, so we use timestep as proxy
+    labelled['Wallet_ID']     = labelled['timestep'].astype(str)
+    labelled['Cluster_ID']    = (labelled['txId'] % 500).astype(str)
     base = pd.Timestamp('2019-01-01')
     labelled['Timestamp'] = base + pd.to_timedelta(labelled['timestep'] * 2, unit='W')
-    labelled['Amount']    = labelled['f0']
+    labelled['Amount']    = labelled['f0']  # First feature approximates transaction amount
     labelled = labelled.sort_values('Timestamp').reset_index(drop=True)
 
-    print(f"[Elliptic] {len(all_nodes)} total nodes | "
+    print(f"[Elliptic Bitcoin] {len(all_nodes)} total transactions | "
           f"{len(labelled)} labelled | Fraud ratio: {labelled['isFraud'].mean():.4f}")
     return labelled, X_all, full_edge_index, txid_to_idx, all_nodes
 
 # ========================
 # LOAD DATASET
 # ========================
-print(f"Loading dataset: {DATASET.upper()}...")
+print(f"Loading Elliptic Bitcoin dataset...")
 dataset_path = find_dataset_path(DATASET)
 if dataset_path is None:
     raise FileNotFoundError(f"Dataset {DATASET} not found")
 print(f"Using dataset path: {dataset_path}")
 
-# Globals set by Elliptic loader
-ELLIPTIC_X_ALL       = None                    # will hold the raw feature matrix for all nodes (labelled + unknown).
-ELLIPTIC_EDGE_INDEX  = None            # will hold the undirected edge index for the full graph.
-ELLIPTIC_TXID_TO_IDX = None            # dictionary mapping transaction IDs to contiguous node indices.
-ELLIPTIC_ALL_NODES   = None             # full node DataFrame
+# Global variables for Elliptic dataset
+ELLIPTIC_X_ALL       = None
+ELLIPTIC_EDGE_INDEX  = None
+ELLIPTIC_TXID_TO_IDX = None
+ELLIPTIC_ALL_NODES   = None
 ELLIPTIC_FEAT_COLS   = []
 
-# Load Elliptic
+# Load the data
 df, ELLIPTIC_X_ALL, ELLIPTIC_EDGE_INDEX, ELLIPTIC_TXID_TO_IDX, ELLIPTIC_ALL_NODES = load_elliptic(dataset_path)
 ELLIPTIC_FEAT_COLS = [c for c in df.columns if c.startswith('f')]
 
 # ========================
-# VELOCITY FEATURES :-features that capture the recent transaction behaviour of a card
+# VELOCITY FEATURES (Bitcoin Wallet Behaviour)
 # ========================
-print("Computing velocity features...")
-df = df.sort_values(['Card_ID','Timestamp'])
+print("Computing velocity features (wallet transaction behaviour)...")
+df = df.sort_values(['Wallet_ID', 'Timestamp'])
 
-def rolling_count_1h(g):                                                                                                        #For a group of transactions belonging to one card, count how many transactions occurred in the previous hour
+def rolling_count_1h(g):
+    """Count number of transactions from the same wallet in the previous hour."""
     ts     = g.set_index('Timestamp')
     result = ts.index.to_series().rolling('1h', closed='left').count().fillna(0)
     result.index = g.index
     return result
 
-def rolling_sum_1h(g):                                                                                                             #it sums the Amount of transactions that occurred in the previous hour.
+def rolling_sum_1h(g):
+    """Sum transaction amounts from the same wallet in the previous hour."""
     result = g.set_index('Timestamp')['Amount'].rolling('1h', closed='left').sum().fillna(0)
     result.index = g.index
     return result
 
-df['tx_count_1h']   = df.groupby('Card_ID', group_keys=False).apply(rolling_count_1h)
-df['amount_sum_1h'] = df.groupby('Card_ID', group_keys=False).apply(rolling_sum_1h)
+df['tx_count_1h']   = df.groupby('Wallet_ID', group_keys=False).apply(rolling_count_1h)
+df['amount_sum_1h'] = df.groupby('Wallet_ID', group_keys=False).apply(rolling_sum_1h)
 df['Amount_log']    = np.log1p(df['Amount'])
 df['Hour_sin']      = np.sin(2 * np.pi * df['Timestamp'].dt.hour / 24)
 df['Hour_cos']      = np.cos(2 * np.pi * df['Timestamp'].dt.hour / 24)
 
 # ========================
-# CHRONOLOGICAL SPLIT:- sets up all necessary data structures for the tabular baselines (MLP and XGBoost) and also prepares the label tensors and masks that will be used later in the graph building for the GNNs
+# CHRONOLOGICAL SPLIT (No Future Leakage)
 # ========================
 train_size = int(len(df) * 0.70)
 val_size   = int(len(df) * 0.15)
@@ -198,15 +205,17 @@ test_df    = df.iloc[train_size + val_size:]
 
 velocity_cols = ['Amount_log', 'tx_count_1h', 'amount_sum_1h', 'Hour_sin', 'Hour_cos']
 
-# Tabular features: velocity + all Elliptic raw features
+# Tabular features: velocity features + raw Elliptic features
 tabular_cols = velocity_cols + ELLIPTIC_FEAT_COLS
-print(f"  Using {len(tabular_cols)} features for tabular models")
+print(f"  Using {len(tabular_cols)} features for tabular models (166 raw + 5 velocity)")
 
+# Labels and masks
 y          = torch.tensor(df['isFraud'].values, dtype=torch.float)
 train_mask = torch.zeros(len(df), dtype=torch.bool); train_mask[:train_size] = True
 val_mask   = torch.zeros(len(df), dtype=torch.bool); val_mask[train_size:train_size+val_size] = True
 test_mask  = torch.zeros(len(df), dtype=torch.bool); test_mask[train_size+val_size:] = True
 
+# Training/validation/test splits for tabular models
 X_train    = df.iloc[:train_size][tabular_cols].values
 X_val      = df.iloc[train_size:train_size+val_size][tabular_cols].values
 X_test     = df.iloc[train_size+val_size:][tabular_cols].values
@@ -214,40 +223,38 @@ y_train_np = df.iloc[:train_size]['isFraud'].values.astype(np.float32)
 y_val_np   = df.iloc[train_size:train_size+val_size]['isFraud'].values.astype(np.float32)
 y_test_np  = df.iloc[train_size+val_size:]['isFraud'].values.astype(np.float32)
 
+# Scale features (fit only on training data)
 scaler_tab = StandardScaler().fit(X_train)
 X_train_s  = scaler_tab.transform(X_train)
 X_val_s    = scaler_tab.transform(X_val)
 X_test_s   = scaler_tab.transform(X_test)
 
 # ========================
-# GRAPH BUILDER — NODE CLASSIFICATION
+# GRAPH BUILDER — BITCOIN TRANSACTION GRAPH
 # ========================
 def build_node_graph(df, train_size, val_size):
     """
-   Maps labelled transactions to global node indices.
-
-   Scales raw features (166) using train‑only stats; adds zero‑padded velocity features (5) for all nodes → 171 features per node.
-
-   Uses full undirected edge list.
-
-   Labels: 0/1 for labelled, -1 for unknown.
-
-   Creates train/val/test masks based on chronological split of labelled nodes.
-
-    Returns PyG Data object for GNN training.
+    Build PyG Data object for Bitcoin transaction graph.
+    
+    - Maps labelled transactions to global node indices
+    - Scales raw features (166) using training-only statistics
+    - Adds velocity features (5) to all nodes (zero-padded for unknown)
+    - Uses full undirected Bitcoin transaction graph
+    - Labels: 1=fraud, 0=legit, -1=unknown
+    - Creates train/val/test masks for node classification
     """
-    # Map labelled txIds to their global node indices
+    # Map labelled transaction IDs to global node indices
     labelled_global_idx = torch.tensor(
         [ELLIPTIC_TXID_TO_IDX[tid] for tid in df['txId']],
         dtype=torch.long
     )
 
-    # Scale the full node feature matrix (fit on train global indices only)
+    # Scale raw features (fit on training nodes only)
     train_global = labelled_global_idx[:train_size].numpy()
     scaler_node  = StandardScaler().fit(ELLIPTIC_X_ALL[train_global])
     X_all_scaled = scaler_node.transform(ELLIPTIC_X_ALL).astype(np.float32)
 
-    # Build velocity feature matrix for labelled nodes (zero-pad for unknown nodes)
+    # Build velocity feature matrix (zero-pad for unknown/unlabelled nodes)
     N_all = ELLIPTIC_X_ALL.shape[0]
     vel   = np.zeros((N_all, len(velocity_cols)), dtype=np.float32)
     vel_vals = StandardScaler().fit(
@@ -256,19 +263,19 @@ def build_node_graph(df, train_size, val_size):
     for i, gidx in enumerate(labelled_global_idx.numpy()):
         vel[gidx] = vel_vals[i]
 
-    # Concatenate: 166 raw + 5 velocity = 171 features per node
+    # Concatenate: 166 raw features + 5 velocity features = 171 total
     node_feats = np.concatenate([X_all_scaled, vel], axis=1)
     x = torch.tensor(node_feats, dtype=torch.float)
 
-    # Subgraph: keep all edges (message passing over entire graph)
-    edge_index = ELLIPTIC_EDGE_INDEX  # already undirected
+    # Full undirected Bitcoin transaction graph
+    edge_index = ELLIPTIC_EDGE_INDEX
 
-    # Labels: -1 for unknown, 0/1 for labelled
+    # Labels: -1 for unknown, 0/1 for labelled transactions
     labels_full = torch.full((N_all,), -1, dtype=torch.float)
     for i, gidx in enumerate(labelled_global_idx.numpy()):
         labels_full[gidx] = float(df.iloc[i]['isFraud'])
 
-    # Masks pointing into the global node index space
+    # Masks for training/validation/testing
     tr_mask = torch.zeros(N_all, dtype=torch.bool)
     vl_mask = torch.zeros(N_all, dtype=torch.bool)
     te_mask = torch.zeros(N_all, dtype=torch.bool)
@@ -281,9 +288,10 @@ def build_node_graph(df, train_size, val_size):
     return data
 
 # ========================
-# METRICS
+# METRICS FUNCTIONS
 # ========================
 def find_best_threshold(y_true, probs):
+    """Find threshold that maximizes F1 score on validation set."""
     thresholds = np.linspace(0.05, 0.95, 91)
     best_t, best_f1 = 0.5, 0.0
     for t in thresholds:
@@ -293,6 +301,7 @@ def find_best_threshold(y_true, probs):
     return best_t
 
 def compute_metrics(y_true, probs, threshold=None):
+    """Compute all evaluation metrics for fraud detection."""
     if threshold is None:
         threshold = find_best_threshold(y_true, probs)
     y_pred = (probs > threshold).astype(int)
@@ -310,9 +319,13 @@ def compute_metrics(y_true, probs, threshold=None):
     }
 
 # ========================
-# LOSS:-Handles class imbalance by down‑weighting easy examples and focusing on hard, misclassified ones.
+# FOCAL LOSS (Handles Class Imbalance)
 # ========================
 class FocalLoss(nn.Module):
+    """
+    Focal Loss for imbalanced fraud detection.
+    Down-weights easy examples, focuses on hard misclassified ones.
+    """
     def __init__(self, alpha=0.75, gamma=2.0, pos_weight=None):
         super().__init__()
         self.alpha = alpha
@@ -328,13 +341,12 @@ class FocalLoss(nn.Module):
         return (alpha_t * (1.0 - pt) ** self.gamma * bce).mean()
 
 # ========================
-# MODEL A: EllipticGNN (proposed)
+# MODEL A: BITCOINGNN (Proposed - 3-layer GAT)
 # ========================
-class EllipticGNN(nn.Module):
+class BitcoinGNN(nn.Module):
     """
-    3-layer Graph Attention Network for node-level fraud classification.
-    Uses multi-head attention, residual connections, and layer norm.
-    Operates on the full Elliptic transaction graph.
+    3-layer Graph Attention Network for Bitcoin transaction fraud classification.
+    Uses multi-head attention, residual connections, and layer normalisation.
     """
     def __init__(self, in_dim, hidden_dim, num_layers=3, heads=4, dropout=0.3):
         super().__init__()
@@ -367,7 +379,7 @@ class EllipticGNN(nn.Module):
         h = F.elu(self.input_proj(x))
         for conv, norm, skip in zip(self.convs, self.norms, self.skips):
             h2 = F.elu(conv(h, edge_index))
-            h  = norm(h2 + skip(h))   # residual
+            h  = norm(h2 + skip(h))   # Residual connection
             h  = F.dropout(h, p=self.dropout, training=self.training)
         return h
 
@@ -376,16 +388,18 @@ class EllipticGNN(nn.Module):
         return self.classifier(h).squeeze(-1)
 
     def mc_dropout_forward(self, data, n):
+        """Monte Carlo Dropout for uncertainty estimation."""
         self.train()
         with torch.no_grad():
             return torch.stack([self.forward(data) for _ in range(n)])
 
 # ========================
-# MODEL B: HomoGNN (ablation)
+# MODEL B: BASELINEGNN (Ablation - 2-layer GraphSAGE)
 # ========================
-class HomoGNN(nn.Module):
+class BaselineGNN(nn.Module):
     """
-    2-layer GraphSAGE ablation — same graph, simpler aggregation.
+    2-layer GraphSAGE ablation model.
+    Same graph structure, simpler aggregation (no attention).
     """
     def __init__(self, in_dim, hidden_dim, dropout=0.3):
         super().__init__()
@@ -404,15 +418,16 @@ class HomoGNN(nn.Module):
     def forward(self, data):
         x  = F.elu(self.proj(data.x))
         ei = data.edge_index
-        h  = self.norm1(F.elu(self.conv1(x,  ei)) + x)
+        h  = self.norm1(F.elu(self.conv1(x, ei)) + x)
         h  = F.dropout(h, p=self.dropout, training=self.training)
-        h  = self.norm2(F.elu(self.conv2(h,  ei)) + h)
+        h  = self.norm2(F.elu(self.conv2(h, ei)) + h)
         return self.head(h).squeeze(-1)
 
 # ========================
-# TRAINING HELPERS
+# TRAINING FUNCTIONS
 # ========================
 def train_node_gnn(model, data, pos_weight):
+    """Train GNN model with early stopping and validation AUC monitoring."""
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -458,6 +473,7 @@ def train_node_gnn(model, data, pos_weight):
         model.load_state_dict(best_state)
 
 def eval_node_gnn(model, data):
+    """Evaluate GNN on test set."""
     model.eval()
     with torch.no_grad():
         logits = model(data)
@@ -466,21 +482,22 @@ def eval_node_gnn(model, data):
     return compute_metrics(y_true, probs)
 
 # ========================
-# MULTI-SEED LOOP
+# MULTI-SEED EXPERIMENTS
 # ========================
-results = {m: [] for m in ['HeteroGNN', 'HomoGNN', 'MLP', 'XGBoost']}
+results = {m: [] for m in ['BitcoinGNN', 'BaselineGNN', 'MLP', 'XGBoost']}
 device  = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"\nRunning {len(SEEDS)} seeds on {device}...\n")
 
 last_gnn_model = None
 last_data      = None
 
-# Build graph once
-print("Building node graph...")
+# Build Bitcoin transaction graph
+print("Building Bitcoin transaction graph...")
 graph_data = build_node_graph(df, train_size, val_size)
 graph_data = graph_data.to(device)
-print(f"  Nodes: {graph_data.num_nodes} | Edges: {graph_data.num_edges} | "
-      f"Features: {graph_data.num_node_features}")
+print(f"  Transactions (nodes): {graph_data.num_nodes:,}")
+print(f"  Payment flows (edges): {graph_data.num_edges:,}")
+print(f"  Features per node: {graph_data.num_node_features}")
 
 in_dim = graph_data.num_node_features
 n_pos  = float(y_train_np.sum())
@@ -496,26 +513,26 @@ for seed in SEEDS:
 
     pw = torch.tensor([n_neg / max(n_pos, 1)], dtype=torch.float).to(device)
 
-    # ── EllipticGNN (proposed) ──
-    print("  [EllipticGNN — 3-layer GAT]")
-    model_a = EllipticGNN(in_dim, HIDDEN_DIM, num_layers=NUM_LAYERS,
-                          heads=4, dropout=DROPOUT).to(device)
+    # ── BitcoinGNN (Proposed - 3-layer GAT) ──
+    print("  [BitcoinGNN — 3-layer Graph Attention Network]")
+    model_a = BitcoinGNN(in_dim, HIDDEN_DIM, num_layers=NUM_LAYERS,
+                         heads=4, dropout=DROPOUT).to(device)
     train_node_gnn(model_a, graph_data, pw)
     ma = eval_node_gnn(model_a, graph_data)
-    results['HeteroGNN'].append(ma)
+    results['BitcoinGNN'].append(ma)
     print(f"  → AUC={ma['ROC-AUC']:.4f}  F1={ma['F1']:.4f}  MCC={ma['MCC']:.4f}")
 
-    # ── GraphSAGE ablation ──
-    print("  [HomoGNN — GraphSAGE ablation]")
+    # ── BaselineGNN (Ablation - 2-layer GraphSAGE) ──
+    print("  [BaselineGNN — GraphSAGE Ablation (no attention)]")
     torch.manual_seed(seed)
-    model_b = HomoGNN(in_dim, HIDDEN_DIM, dropout=DROPOUT).to(device)
+    model_b = BaselineGNN(in_dim, HIDDEN_DIM, dropout=DROPOUT).to(device)
     train_node_gnn(model_b, graph_data, pw)
     mb = eval_node_gnn(model_b, graph_data)
-    results['HomoGNN'].append(mb)
+    results['BaselineGNN'].append(mb)
     print(f"  → AUC={mb['ROC-AUC']:.4f}  F1={mb['F1']:.4f}  MCC={mb['MCC']:.4f}")
 
-    # ── MLP baseline ──
-    print("  [MLP baseline]")
+    # ── MLP Baseline (Tabular) ──
+    print("  [MLP Baseline — Tabular Features Only]")
     mlp = MLPClassifier(hidden_layer_sizes=(256, 128, 64), max_iter=300,
                         random_state=seed, early_stopping=True,
                         validation_fraction=0.1)
@@ -524,9 +541,9 @@ for seed in SEEDS:
     results['MLP'].append(mm)
     print(f"  → AUC={mm['ROC-AUC']:.4f}  F1={mm['F1']:.4f}  MCC={mm['MCC']:.4f}")
 
-    # ── XGBoost baseline (if available) ──
+    # ── XGBoost Baseline (Tabular) ──
     if HAS_XGB:
-        print("  [XGBoost baseline]")
+        print("  [XGBoost Baseline — Tabular Features Only]")
         xgb = XGBClassifier(
             n_estimators=400, max_depth=6, learning_rate=0.05,
             scale_pos_weight=n_neg / max(n_pos, 1),
@@ -545,9 +562,10 @@ for seed in SEEDS:
     last_data      = graph_data
 
 # ========================
-# AGGREGATE + WILCOXON
+# AGGREGATE RESULTS + WILCOXON TEST
 # ========================
 def agg(res_list, name):
+    """Aggregate metrics across seeds (mean ± std)."""
     keys = ['ROC-AUC', 'F1', 'MCC', 'Balanced Acc', 'Precision', 'Recall']
     out  = {}
     print(f"\n{'─'*55}")
@@ -560,31 +578,31 @@ def agg(res_list, name):
     return out
 
 print("\n\n" + "="*55)
-print("FINAL AGGREGATED RESULTS")
+print("FINAL AGGREGATED RESULTS — BITCOIN FRAUD DETECTION")
 print("="*55)
 aggs = {m: agg(results[m], m) for m in results if results[m]}
 
-# Wilcoxon: HeteroGNN vs best competitor
-competitors = [m for m in ['XGBoost', 'MLP', 'HomoGNN'] if results[m]]
+# Wilcoxon signed-rank test: BitcoinGNN vs best competitor
+competitors = [m for m in ['XGBoost', 'MLP', 'BaselineGNN'] if results[m]]
 if competitors:
     best_comp = max(competitors, key=lambda m: aggs[m]['ROC-AUC'][0])
-    gnn_aucs  = aggs['HeteroGNN']['ROC-AUC'][2]
+    gnn_aucs  = aggs['BitcoinGNN']['ROC-AUC'][2]
     cmp_aucs  = aggs[best_comp]['ROC-AUC'][2]
     diffs = np.array(gnn_aucs) - np.array(cmp_aucs)
     if len(set(diffs)) > 1:
         stat, p = wilcoxon(gnn_aucs, cmp_aucs)
         sig = "✅ Significant (p<0.05)" if p < 0.05 else "❌ Not significant"
-        print(f"\nWilcoxon HeteroGNN vs {best_comp}: p={p:.4f}  {sig}")
+        print(f"\nWilcoxon BitcoinGNN vs {best_comp}: p={p:.4f}  {sig}")
 
 # ========================
-# ABLATION TABLE
+# ABLATION STUDY TABLE
 # ========================
 print("\n\n" + "="*55)
 print("TABLE 1 — Ablation Study (Mean ± Std, n=5 seeds)")
 print("="*55)
 print(f"{'Model':<22}{'AUC':>14}{'F1':>14}{'MCC':>14}")
 print("─"*64)
-order = ['MLP', 'XGBoost', 'HomoGNN', 'HeteroGNN']
+order = ['MLP', 'XGBoost', 'BaselineGNN', 'BitcoinGNN']
 for m in order:
     if m not in aggs:
         continue
@@ -592,34 +610,34 @@ for m in order:
     auc = f"{a['ROC-AUC'][0]:.4f}±{a['ROC-AUC'][1]:.4f}"
     f1  = f"{a['F1'][0]:.4f}±{a['F1'][1]:.4f}"
     mcc = f"{a['MCC'][0]:.4f}±{a['MCC'][1]:.4f}"
-    tag = "  ours" if m == 'HeteroGNN' else ""
+    tag = "  ours" if m == 'BitcoinGNN' else ""
     print(f"{m:<22}{auc:>14}{f1:>14}{mcc:>14}{tag}")
 
 # ========================
-# MC DROPOUT + CALIBRATION
+# MC DROPOUT UNCERTAINTY + CALIBRATION
 # ========================
-print("\nComputing MC Dropout uncertainty...")
+print("\nComputing MC Dropout uncertainty (30 forward passes)...")
 logits_mc  = last_gnn_model.mc_dropout_forward(last_data, MC_SAMPLES)
 std_mc     = torch.sigmoid(logits_mc).std(dim=0)
 test_unc   = std_mc[last_data.test_mask].cpu().numpy()
-print(f"Mean uncertainty: {test_unc.mean():.4f}")
+print(f"Mean prediction uncertainty (std dev): {test_unc.mean():.4f}")
 
-last_gnn_res = results['HeteroGNN'][-1]
+last_gnn_res = results['BitcoinGNN'][-1]
 prob_true_cal, prob_pred_cal = calibration_curve(
     last_gnn_res['true'], last_gnn_res['probs'], n_bins=10)
 ece = np.mean(np.abs(prob_true_cal - prob_pred_cal))
-print(f"ECE: {ece:.4f}")
+print(f"Expected Calibration Error (ECE): {ece:.4f}")
 
 # ========================
-# FIGURES
+# VISUALIZATIONS
 # ========================
 fig, axes = plt.subplots(2, 3, figsize=(16, 10))
-fig.suptitle(f'Fraud Detection Results — {DATASET.upper()} Dataset',
+fig.suptitle(f'Bitcoin Fraud Detection Results — Elliptic Dataset',
              fontsize=14, fontweight='bold')
 
-# ROC comparison
+# ROC curves comparison
 ax = axes[0, 0]
-for mname, color, ls in [('HeteroGNN', '#e74c3c', '-'), ('HomoGNN', '#3498db', '--'),
+for mname, color, ls in [('BitcoinGNN', '#e74c3c', '-'), ('BaselineGNN', '#3498db', '--'),
                           ('MLP', '#2ecc71', ':'), ('XGBoost', '#f39c12', '-.')]:
     if not results[mname]:
         continue
@@ -627,10 +645,12 @@ for mname, color, ls in [('HeteroGNN', '#e74c3c', '-'), ('HomoGNN', '#3498db', '
     fpr, tpr, _ = roc_curve(r['true'], r['probs'])
     ax.plot(fpr, tpr, color=color, ls=ls, label=f"{mname} AUC={r['ROC-AUC']:.3f}")
 ax.plot([0, 1], [0, 1], 'k--', alpha=0.3)
-ax.set_title('ROC Curve Comparison'); ax.legend(fontsize=8)
-ax.set_xlabel('FPR'); ax.set_ylabel('TPR')
+ax.set_title('ROC Curve Comparison')
+ax.legend(fontsize=8)
+ax.set_xlabel('False Positive Rate')
+ax.set_ylabel('True Positive Rate')
 
-# Ablation bar
+# Ablation bar chart
 ax = axes[0, 1]
 metrics_bar = ['ROC-AUC', 'F1', 'MCC']
 x = np.arange(len(metrics_bar))
@@ -642,21 +662,27 @@ for i, (mname, color) in enumerate(zip(order, colors)):
     means = [aggs[mname][k][0] for k in metrics_bar]
     stds  = [aggs[mname][k][1] for k in metrics_bar]
     ax.bar(x + i * w, means, w, label=mname, color=color, yerr=stds, capsize=3)
-ax.set_xticks(x + w * 1.5); ax.set_xticklabels(metrics_bar)
-ax.set_title('Ablation Study'); ax.legend(fontsize=8); ax.set_ylim(0, 1.1)
+ax.set_xticks(x + w * 1.5)
+ax.set_xticklabels(metrics_bar)
+ax.set_title('Ablation Study (5 seeds)')
+ax.legend(fontsize=8)
+ax.set_ylim(0, 1.1)
 
-# Calibration
+# Calibration curve
 ax = axes[0, 2]
-ax.plot(prob_pred_cal, prob_true_cal, 'o-', label=f'EllipticGNN (ECE={ece:.3f})')
-ax.plot([0, 1], [0, 1], 'k--', label='Perfect')
-ax.set_title('Calibration Curve'); ax.legend()
-ax.set_xlabel('Mean predicted prob'); ax.set_ylabel('Fraction positives')
+ax.plot(prob_pred_cal, prob_true_cal, 'o-', label=f'BitcoinGNN (ECE={ece:.3f})')
+ax.plot([0, 1], [0, 1], 'k--', label='Perfect Calibration')
+ax.set_title('Calibration Curve')
+ax.legend()
+ax.set_xlabel('Mean Predicted Probability')
+ax.set_ylabel('Actual Fraud Rate')
 
 # Uncertainty histogram
 ax = axes[1, 0]
 ax.hist(test_unc, bins=30, alpha=0.8, edgecolor='black', color='#3498db')
 ax.set_title('MC Dropout Uncertainty (Test Set)')
-ax.set_xlabel('Std Dev'); ax.set_ylabel('Count')
+ax.set_xlabel('Prediction Standard Deviation')
+ax.set_ylabel('Number of Transactions')
 
 # Confusion matrix
 ax = axes[1, 1]
@@ -665,21 +691,22 @@ ConfusionMatrixDisplay.from_predictions(
     last_gnn_res['true'],
     (last_gnn_res['probs'] > best_thresh).astype(int), ax=ax
 )
-ax.set_title(f'EllipticGNN Confusion Matrix (t={best_thresh:.2f})')
+ax.set_title(f'BitcoinGNN Confusion Matrix (threshold={best_thresh:.2f})')
 
-# AUC box plot
+# AUC box plot across seeds
 ax = axes[1, 2]
 plot_data  = [aggs[m]['ROC-AUC'][2] for m in order if m in aggs]
 plot_names = [m for m in order if m in aggs]
 ax.boxplot(plot_data, patch_artist=True,
            boxprops=dict(facecolor='#3498db', alpha=0.6))
 ax.set_xticklabels(plot_names, rotation=15)
-ax.set_title('AUC Distribution (5 seeds)')
+ax.set_title('AUC Distribution Across 5 Seeds')
 ax.set_ylabel('ROC-AUC')
 
 plt.tight_layout()
-plt.savefig('research_results.png', dpi=150)
-print("\nSaved research_results.png")
+plt.savefig('bitcoin_fraud_results.png', dpi=150)
+print("\nSaved bitcoin_fraud_results.png")
 
-torch.save(last_gnn_model.state_dict(), 'best_model.pt')
-print("Saved best_model.pt")
+# Save the best model
+torch.save(last_gnn_model.state_dict(), 'bitcoin_fraud_best_model.pt')
+print("Saved bitcoin_fraud_best_model.pt")
