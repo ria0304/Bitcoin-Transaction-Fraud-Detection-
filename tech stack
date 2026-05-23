@@ -1,0 +1,43 @@
+Tech Stack  
+
+Programming Language  
+- Python  
+
+Core Libraries  
+- NumPy  
+- Pandas  
+- Matplotlib  
+
+Machine Learning  
+- Scikit-learn  
+  - MLPClassifier  
+  - StandardScaler  
+  - Evaluation Metrics (Precision, Recall, F1, ROC-AUC, MCC)  
+
+Deep Learning  
+- PyTorch  
+  - Neural Networks (nn, functional API)  
+  - Optimization (AdamW, LR Scheduler)  
+
+Graph Neural Networks  
+- PyTorch Geometric  
+  - GATConv (Graph Attention Network)  
+  - SAGEConv (GraphSAGE)  
+  - Data Handling (Data, edge_index)  
+
+Advanced Techniques  
+- Focal Loss (for imbalanced data)  
+- Monte Carlo Dropout (uncertainty estimation)  
+- Feature Engineering (velocity features)  
+- Threshold Optimization  
+
+Optional / Additional  
+- XGBoost (if installed)  
+- KaggleHub (for dataset download)  
+
+Statistical Analysis  
+- SciPy (Wilcoxon Test)  
+
+Visualization  
+- Matplotlib  
+- Confusion Matrix & ROC Curve plotting  
