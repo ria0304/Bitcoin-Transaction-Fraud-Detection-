@@ -19,10 +19,16 @@ Run
 ---
     python main.py
 
-Environment variables
----------------------
-    BITCOIN_DATA_PATH  – local path to dataset (see configs/config.py)
-    ELLIPTIC_CACHE     – KaggleHub cache path
+Environment variables (set in .env or shell)
+---------------------------------------------
+    BITCOIN_DATA_PATH  – local path to Elliptic dataset folder
+    KAGGLE_USERNAME    – Kaggle username (only needed for auto-download)
+    KAGGLE_KEY         – Kaggle API key  (only needed for auto-download)
+    OUTPUT_DIR         – where to save outputs (default: ./outputs)
+    EPOCHS             – override training epochs
+    HIDDEN_DIM         – override hidden dimension
+    LEARNING_RATE      – override learning rate
+    SEEDS              – comma-separated list of seeds, e.g. 42,123,2024
 """
 
 import os
@@ -30,6 +36,13 @@ import json
 import random
 import warnings
 warnings.filterwarnings("ignore")
+
+# ─── Load .env file before anything else ─────────────────────────────────────
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # dotenv is optional; env vars can be set directly in the shell
 
 import numpy as np
 import pandas as pd
@@ -65,7 +78,8 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"\n{'='*60}")
 print(f"  Bitcoin Fraud Detection — ElliGAT")
-print(f"  Device: {device}")
+print(f"  Device : {device}")
+print(f"  Output : {OUTPUT_DIR}")
 print(f"{'='*60}\n")
 
 # ─── 1. Load dataset ─────────────────────────────────────────────────────────
@@ -73,8 +87,10 @@ print("Step 1: Loading Elliptic Bitcoin dataset …")
 dataset_path = find_dataset_path(DATASET, PROJECT_DATA_PATH, ELLIPTIC_CACHE_PATH)
 if dataset_path is None:
     raise FileNotFoundError(
-        "Elliptic dataset not found. Set BITCOIN_DATA_PATH env var or "
-        "install kagglehub and run with Kaggle credentials."
+        "Elliptic dataset not found.\n"
+        "  Option A: set BITCOIN_DATA_PATH in your .env file.\n"
+        "  Option B: set KAGGLE_USERNAME + KAGGLE_KEY in .env for auto-download.\n"
+        "  See .env.example for details."
     )
 print(f"  Path: {dataset_path}")
 
@@ -217,11 +233,10 @@ for seed in SEEDS:
 
     # ── MetaEnsemble ────────────────────────────────────────────────────────
     print("\n  [MetaEnsemble — stacked GNN + tabular]")
-    # Get validation probs from GNN + tabular
     ellgat.eval()
     with torch.no_grad():
-        gnn_val_logits = ellgat(graph_data)
-        gnn_val_probs  = torch.sigmoid(
+        gnn_val_logits  = ellgat(graph_data)
+        gnn_val_probs   = torch.sigmoid(
             gnn_val_logits[graph_data.val_mask]
         ).cpu().numpy()
         gnn_test_logits = ellgat(graph_data)
@@ -238,7 +253,6 @@ for seed in SEEDS:
     results_per_seed["MetaEnsemble"].append(me_res)
     print(f"    → AUC={me_res['ROC-AUC']:.4f}  F1={me_res['F1']:.4f}  MCC={me_res['MCC']:.4f}")
 
-    # Store final seed's models for plotting
     last_ellgat_model = ellgat
     last_graph_data   = graph_data
 
@@ -285,7 +299,7 @@ for name in ["MLP", "RandomForest", "XGBoost", "LightGBM",
              "BaselineGNN", "EvolveGCN", "ElliGAT", "MetaEnsemble"]:
     if name not in aggs:
         continue
-    a = aggs[name]
+    a    = aggs[name]
     auc  = f"{a['ROC-AUC'][0]:.4f}±{a['ROC-AUC'][1]:.4f}"
     f1   = f"{a['F1'][0]:.4f}±{a['F1'][1]:.4f}"
     mcc  = f"{a['MCC'][0]:.4f}±{a['MCC'][1]:.4f}"
@@ -310,11 +324,11 @@ save_results_figure(last_results_final, aggs, unc_std, unc_y, RESULTS_PLOT_PATH)
 
 # ─── 12. Save model + metrics ────────────────────────────────────────────────
 torch.save(last_ellgat_model.state_dict(), BEST_MODEL_PATH)
-print(f"  Saved model → {BEST_MODEL_PATH}")
+print(f"  Saved model   → {BEST_MODEL_PATH}")
 
 metrics_out = {
     name: {
-        k: {"mean": v[0], "std": v[1]}
+        k: {"mean": float(v[0]), "std": float(v[1])}
         for k, v in aggs[name].items()
         if k not in ("probs", "true")
     }
