@@ -2,18 +2,82 @@
 
 > **Heterophily-aware graph attention network** for illicit transaction detection on the
 > [Elliptic Bitcoin Dataset](https://www.kaggle.com/datasets/ellipticco/elliptic-data-set).
-> ElliGAT combines a 4-layer GATv2 encoder with temporal edge encoding, a heterophily
-> readout, and a MetaEnsemble stacker — achieving **F1 = 0.7925 ± 0.0104** on the GNN
-> component and **F1 = 0.8629 ± 0.0038** with the full ensemble (5-seed average).
+> ElliGAT achieves **F1 = 0.7925 ± 0.0104** on the GNN component and
+> **F1 = 0.8629 ± 0.0038** with the full MetaEnsemble (5-seed average, 468K edges).
+
+---
+
+## Problem Statement
+
+Cryptocurrency networks like Bitcoin operate without a central authority, making
+them attractive for money laundering, ransomware payments, and other illicit
+activity. Detecting fraud in these networks is fundamentally hard for three reasons:
+
+**1. The graph is heterophilous.**
+Illicit nodes are rarely clustered together. Fraudsters deliberately route
+transactions through legitimate wallets (mixing, layering) so that each fraud
+node is typically surrounded by licit neighbours. Standard GNNs aggregate
+neighbour messages and average away exactly the signal that distinguishes fraud.
+
+**2. The data is severely imbalanced.**
+Only ~9.76% of labelled transactions in the Elliptic dataset are illicit.
+Models that optimise AUC alone can achieve high scores while missing most
+actual fraud — the minority class that matters most.
+
+**3. The graph evolves over time.**
+The Elliptic dataset spans 49 timesteps. A model that ignores temporal
+structure treats edges from different time periods as equivalent, losing
+information about transaction velocity and sequence.
+
+Existing approaches — GCN, GAT, EvolveGCN — address at most one of these
+three problems at a time. No published method on the Elliptic benchmark
+simultaneously handles heterophily, class imbalance, and temporal dynamics
+within a single unified architecture.
+
+---
+
+## Solution
+
+ElliGAT is designed to address all three problems in one framework:
+
+**Heterophily-aware readout.**
+Instead of using only the node embedding `h_i`, ElliGAT appends the
+difference between a node and its neighbourhood mean: `[h_i ∥ h_i − μ(h_Nj)]`.
+This explicitly encodes *how different* a node is from its neighbours —
+a strong discriminative signal for fraud nodes surrounded by licit transactions.
+
+**Imbalance-robust training.**
+ElliGAT uses Focal Loss (α=0.80, γ=2.5) which down-weights easy licit
+examples and focuses training on hard fraud cases. The validation criterion
+is the harmonic mean of AUC and F1 — preventing the common failure mode
+where a model maximises AUC while F1 collapses on the minority class.
+
+**Temporal edge encoding.**
+Each edge carries a 16-dimensional encoding of |Δtimestep| between connected
+transactions. This lets the GATv2 attention mechanism learn that edges crossing
+large time gaps carry different information than edges within the same timestep,
+capturing the sequential structure of the Bitcoin transaction graph.
+
+**Two-phase training.**
+Phase 1 is self-supervised pre-training with a masked feature autoencoder
+(mask ratio 0.20), giving the model a strong initialisation before seeing
+any labels. Phase 2 fine-tunes with the combined Focal Loss on labelled nodes.
+
+**MetaEnsemble stacking.**
+A calibrated logistic regression meta-learner stacks ElliGAT's predictions
+with XGBoost, LightGBM, RandomForest, and MLP outputs. The tabular models
+capture feature patterns the GNN misses; the GNN captures graph structure
+the tabular models cannot access. Together they achieve higher F1 than
+any single model alone.
 
 ---
 
 ## Results
 
 All results are averaged over **5 random seeds** (42, 123, 2024, 17, 99) on the
-chronological 70/15/15 train/val/test split of the Elliptic dataset.
-EvolveGCN numbers are taken from the original paper (Pareja et al., 2020) as the
-model could not be reproduced under available GPU memory constraints.
+chronological 70/15/15 train/val/test split. EvolveGCN numbers are taken from
+the original paper (Pareja et al., 2020) as the model could not be reproduced
+under available GPU memory constraints.
 
 | Model | ROC-AUC | F1 | MCC |
 |---|---|---|---|
@@ -29,8 +93,8 @@ model could not be reproduced under available GPU memory constraints.
 **ElliGAT vs EvolveGCN (cited):** +7.3% F1, +0.68% AUC  
 **MetaEnsemble vs EvolveGCN (cited):** +14.3% F1, +4.7% AUC
 
-> Graph edges (468,710 undirected) were loaded for all experiments.
-> Precision: 0.8976 ± 0.0112 | Recall: 0.7096 ± 0.0131 | Balanced Acc: 0.8514 ± 0.0066
+> Precision: 0.8976 ± 0.0112 | Recall: 0.7096 ± 0.0131 | Balanced Acc: 0.8514 ± 0.0066  
+> Graph: 203,769 nodes · 468,710 undirected edges · 172 features/node
 
 ---
 
@@ -46,29 +110,20 @@ Input (172-d = 165 raw + 7 velocity features)
   └─► Heterophily readout: [h ∥ h − μ(h_N)]   (2×256 = 512-d)
   └─► MLP classifier                     (512 → 256 → 128 → 1)
 
-Training objectives:
-  • Masked-feature autoencoder  (pre-training, mask_ratio = 0.20)
-  • Focal Loss                  (α = 0.80, γ = 2.5)
-  • Validation criterion        HM(AUC, F1) — prevents F1 collapse
-  • LR schedule                 Warm-up + Cosine annealing
+Training
+  Phase 1 — self-supervised pre-training
+    • Masked feature autoencoder         (mask_ratio = 0.20)
+    • Warm-up + Cosine LR schedule
+  Phase 2 — fine-tuning
+    • Focal Loss                         (α = 0.80, γ = 2.5)
+    • Validation criterion: HM(AUC, F1) — prevents F1 collapse
+    • Early stopping on best HM score
 
 MetaEnsemble
 ──────────────────────────────────────────────────────
   Base models : ElliGAT · XGBoost · LightGBM · MLP · RandomForest
   Meta-learner: isotonic-calibrated logistic regression (5-fold CV)
 ```
-
----
-
-## Why Heterophily Awareness?
-
-Illicit transactions in Elliptic are *heterophilous* — they are often directly
-connected to licit transactions (mixing services, layering). Standard message
-passing averages neighbour embeddings, which dilutes the fraud signal.
-
-ElliGAT's heterophily readout `[h_i ∥ h_i − μ(h_Nj)]` explicitly encodes
-*how different* a node is from its neighbourhood — a strong discriminative
-signal for fraud detection in transaction graphs.
 
 ---
 
@@ -81,6 +136,7 @@ signal for fraud detection in transaction graphs.
 | Hidden dim / heads | 128 / 4 | 256 / 8 |
 | Heterophily readout | None | [h ∥ h − μ(h_N)] |
 | Pre-training | None | Masked feature autoencoder |
+| Loss function | Cross-entropy | Focal Loss (α=0.80, γ=2.5) |
 | LR schedule | Cosine | Warm-up + Cosine |
 | Validation criterion | AUC only | HM(AUC, F1) |
 | Velocity features | 5 | 7 (adds 24h count + std) |
@@ -118,27 +174,12 @@ export BITCOIN_DATA_PATH="/path/to/elliptic-data-set"
 python main.py
 ```
 
-Outputs saved to `outputs/`:
-- `best_model.pt`  — ElliGAT weights
-- `results.png`    — results figure
-- `metrics.json`   — all metrics (mean ± std, 5 seeds)
+Results are logged to `run_log.txt` during training.
+Metrics (mean ± std across 5 seeds) are printed to stdout on completion.
 
 > **No dataset?** Leave `BITCOIN_DATA_PATH` unset and the pipeline will attempt
 > auto-download via [KaggleHub](https://github.com/Kaggle/kagglehub).
 > You need a Kaggle account and `~/.kaggle/kaggle.json` credentials.
-
----
-
-## Dataset
-
-| Statistic | Value |
-|---|---|
-| Transactions (nodes) | 203,769 |
-| Payment flows (directed edges) | 234,355 → 468,710 undirected |
-| Features per node | 172 (165 raw + 7 velocity) |
-| Labelled transactions | 46,564 (~22.9%) |
-| Fraud class ratio | 9.76% |
-| Train / Val / Test split | 32,594 / 6,984 / 6,986 (chronological) |
 
 ---
 
@@ -155,10 +196,23 @@ The full 5-seed pipeline takes approximately **46 minutes on a T4 GPU**.
 !pip install lightgbm xgboost scikit-learn pandas numpy matplotlib
 
 %cd /content/elligat
-!python main.py
+!python -u main.py 2>&1 | tee run_log.txt
 ```
 
 Set Runtime → T4 GPU before running.
+
+---
+
+## Dataset
+
+| Statistic | Value |
+|---|---|
+| Transactions (nodes) | 203,769 |
+| Payment flows (directed edges) | 234,355 → 468,710 undirected |
+| Features per node | 172 (165 raw + 7 velocity) |
+| Labelled transactions | 46,564 (~22.9%) |
+| Fraud class ratio | 9.76% |
+| Train / Val / Test split | 32,594 / 6,984 / 6,986 (chronological) |
 
 ---
 
