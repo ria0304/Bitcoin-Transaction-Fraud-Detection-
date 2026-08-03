@@ -70,7 +70,7 @@ capture feature patterns the GNN misses; the GNN captures graph structure
 the tabular models cannot access. Together they achieve higher F1 than
 any single model alone.
 
----
+----
 
 ## Results
 
