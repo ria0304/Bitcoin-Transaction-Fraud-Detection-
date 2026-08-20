@@ -36,6 +36,62 @@ within a single unified architecture.
 
 ---
 
+## Blockchain Data Provenance
+
+ElliGAT does not train on raw blockchain data directly — it trains on the
+**Elliptic dataset**, a graph *derived* from the real Bitcoin blockchain by
+Weber et al. (2019). Understanding that derivation matters, because it is
+the reason the graph has the exact structure (nodes, edges, features) that
+ElliGAT's architecture is designed around.
+
+**How the graph is extracted from the chain:**
+
+1. **Blocks → Transactions.** The Bitcoin blockchain is an append-only,
+   hash-linked sequence of blocks; each block contains a batch of
+   transactions confirmed at that point in time.
+2. **Transactions → UTXO graph.** Every transaction consumes previous
+   *unspent transaction outputs* (inputs) and creates new ones (outputs).
+   Following these input/output links across the chain produces a directed
+   graph of payment flows between transactions — the UTXO graph.
+3. **UTXO graph → Node/edge graph.** Elliptic samples 203,769 transactions
+   from this UTXO graph as **nodes**, and the **234,355 directed payment
+   flows** between them as **edges** (468,710 when treated as undirected).
+   Each node carries 166 features computed directly from the transaction's
+   on-chain data (e.g. number of inputs/outputs, transaction fee, output
+   volume) plus locally-aggregated neighbourhood statistics, grouped into
+   **49 discrete timesteps** (~2 weeks of chain activity each) spanning
+   roughly a 3-year window.
+4. **Labels via forensic clustering.** ~22.9% of nodes are labelled licit or
+   illicit; labels come from linking clusters of addresses (via heuristics
+   such as common-input-ownership) to known real-world entities — exchanges,
+   wallet providers, mining pools (licit) versus scams, malware, ransomware,
+   and darknet markets (illicit) — cross-referenced against public
+   blockchain forensics resources.
+
+**Why this matters for ElliGAT's design:** the three properties ElliGAT is
+built to handle — heterophily, class imbalance, and temporal drift — are not
+artifacts of the dataset; they are direct consequences of how value actually
+moves on the Bitcoin blockchain. Mixing and layering by illicit actors
+produces heterophilous neighbourhoods; the rarity of confirmed illicit
+activity relative to total chain volume produces the ~9.76% imbalance; and
+the blockchain's block-ordered, append-only structure is what makes the
+49-timestep temporal signal meaningful in the first place. The
+[16-dimensional temporal edge encoding](#architecture) and heterophily
+readout are therefore modelling the underlying blockchain, not just fitting
+an arbitrary graph dataset.
+
+![Blockchain to graph](blockchain_to_graph.png)
+*Figure: how blocks on the Bitcoin blockchain are unpacked into the
+transaction-level UTXO graph, which is then sampled into the node/edge
+graph that ElliGAT trains on.*
+
+> **Note:** the released Elliptic features are anonymised/derived, not raw
+> address or amount data, for privacy reasons — so ElliGAT operates one step
+> removed from the live chain. See [Live On-Chain Inference](#live-on-chain-inference-optional)
+> below for a path to running ElliGAT on freshly-fetched transactions.
+
+---
+
 ## Solution
 
 ElliGAT is designed to address all three problems in one framework:
@@ -226,6 +282,43 @@ Set Runtime → T4 GPU before running.
 | Meta-learner | Scikit-learn LogisticRegression (isotonic calibration) |
 | Data | Pandas, NumPy |
 | Visualisation | Matplotlib |
+
+---
+
+## Live On-Chain Inference
+
+The Elliptic dataset is a static snapshot. `src/onchain.py` extends the
+pipeline to **real** Bitcoin data: it fetches the most recently confirmed
+block from a public blockchain API (Blockstream's Esplora, no API key
+required), reconstructs a feature graph from the raw transaction data, and
+runs the trained ElliGAT model on it.
+
+```bash
+pip install requests   # if not already installed
+python -m src.onchain --num-tx 200 --top-k 15 --checkpoint outputs/best_model.pt
+```
+
+This will:
+1. Fetch the latest confirmed block and up to `--num-tx` of its transactions
+   (full input/output/fee data) from `blockstream.info/api`.
+2. Build payment-flow edges between fetched transactions the same way
+   `src/data.py` builds them from `elliptic_txs_edgelist.csv` — an edge
+   `A → B` exists if transaction `B` spends an output of transaction `A`.
+3. Compute the 7 velocity features (`Amount_log`, `tx_count_1h`, etc.) for
+   real, using the same definitions as `src/data.py::add_velocity_features`.
+4. Load `outputs/best_model.pt` (produced by `main.py`) and print the
+   transactions with the highest predicted fraud probability.
+
+**Important limitation:** the Elliptic dataset's other 166 raw node
+features are a proprietary, undocumented transformation of on-chain
+data — their exact definitions were never released, so they cannot be
+reconstructed from a public API and are zero-imputed for live transactions
+(see the docstring in `src/onchain.py` for the full breakdown). Only
+7 of 173 input dimensions are "real" for live data. Treat this module as
+a **deployment feasibility demo**, not a like-for-like comparison to the
+Elliptic benchmark numbers above — it shows the pipeline can ingest and
+score genuine on-chain data end-to-end, not that it matches benchmark
+accuracy on it.
 
 ---
 
