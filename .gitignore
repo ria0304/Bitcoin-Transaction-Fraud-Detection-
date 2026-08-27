@@ -1,0 +1,14 @@
+# Large files and datasets
+elliptic_bitcoin_dataset/
+*.pt
+*.png
+*.docx
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.vscode/
+.idea/
