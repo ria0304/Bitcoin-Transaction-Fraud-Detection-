@@ -1,0 +1,386 @@
+# ElliGAT — Bitcoin Transaction Fraud Detection
+
+> **Heterophily-aware graph attention network** for illicit transaction detection on the
+> [Elliptic Bitcoin Dataset](https://www.kaggle.com/datasets/ellipticco/elliptic-data-set).
+> ElliGAT achieves **F1 = 0.7925 ± 0.0104** on the GNN component and
+> **F1 = 0.8629 ± 0.0038** with the full MetaEnsemble (5-seed average, 468K edges).
+
+---
+
+## Problem Statement
+
+Cryptocurrency networks like Bitcoin operate without a central authority, making
+them attractive for money laundering, ransomware payments, and other illicit
+activity. Detecting fraud in these networks is fundamentally hard for three reasons:
+
+**1. The graph is heterophilous.**
+Illicit nodes are rarely clustered together. Fraudsters deliberately route
+transactions through legitimate wallets (mixing, layering) so that each fraud
+node is typically surrounded by licit neighbours. Standard GNNs aggregate
+neighbour messages and average away exactly the signal that distinguishes fraud.
+
+**2. The data is severely imbalanced.**
+Only ~9.76% of labelled transactions in the Elliptic dataset are illicit.
+Models that optimise AUC alone can achieve high scores while missing most
+actual fraud — the minority class that matters most.
+
+**3. The graph evolves over time.**
+The Elliptic dataset spans 49 timesteps. A model that ignores temporal
+structure treats edges from different time periods as equivalent, losing
+information about transaction velocity and sequence.
+
+Existing approaches — GCN, GAT, EvolveGCN — address at most one of these
+three problems at a time. No published method on the Elliptic benchmark
+simultaneously handles heterophily, class imbalance, and temporal dynamics
+within a single unified architecture.
+
+---
+
+## Blockchain Data Provenance
+
+ElliGAT does not train on raw blockchain data directly — it trains on the
+**Elliptic dataset**, a graph *derived* from the real Bitcoin blockchain by
+Weber et al. (2019). Understanding that derivation matters, because it is
+the reason the graph has the exact structure (nodes, edges, features) that
+ElliGAT's architecture is designed around.
+
+**How the graph is extracted from the chain:**
+
+1. **Blocks → Transactions.** The Bitcoin blockchain is an append-only,
+   hash-linked sequence of blocks; each block contains a batch of
+   transactions confirmed at that point in time.
+2. **Transactions → UTXO graph.** Every transaction consumes previous
+   *unspent transaction outputs* (inputs) and creates new ones (outputs).
+   Following these input/output links across the chain produces a directed
+   graph of payment flows between transactions — the UTXO graph.
+3. **UTXO graph → Node/edge graph.** Elliptic samples 203,769 transactions
+   from this UTXO graph as **nodes**, and the **234,355 directed payment
+   flows** between them as **edges** (468,710 when treated as undirected).
+   Each node carries 166 features computed directly from the transaction's
+   on-chain data (e.g. number of inputs/outputs, transaction fee, output
+   volume) plus locally-aggregated neighbourhood statistics, grouped into
+   **49 discrete timesteps** (~2 weeks of chain activity each) spanning
+   roughly a 3-year window.
+4. **Labels via forensic clustering.** ~22.9% of nodes are labelled licit or
+   illicit; labels come from linking clusters of addresses (via heuristics
+   such as common-input-ownership) to known real-world entities — exchanges,
+   wallet providers, mining pools (licit) versus scams, malware, ransomware,
+   and darknet markets (illicit) — cross-referenced against public
+   blockchain forensics resources.
+
+**Why this matters for ElliGAT's design:** the three properties ElliGAT is
+built to handle — heterophily, class imbalance, and temporal drift — are not
+artifacts of the dataset; they are direct consequences of how value actually
+moves on the Bitcoin blockchain. Mixing and layering by illicit actors
+produces heterophilous neighbourhoods; the rarity of confirmed illicit
+activity relative to total chain volume produces the ~9.76% imbalance; and
+the blockchain's block-ordered, append-only structure is what makes the
+49-timestep temporal signal meaningful in the first place. The
+[16-dimensional temporal edge encoding](#architecture) and heterophily
+readout are therefore modelling the underlying blockchain, not just fitting
+an arbitrary graph dataset.
+
+![Blockchain to graph](blockchain_to_graph.png)
+*Figure: how blocks on the Bitcoin blockchain are unpacked into the
+transaction-level UTXO graph, which is then sampled into the node/edge
+graph that ElliGAT trains on.*
+
+> **Note:** the released Elliptic features are anonymised/derived, not raw
+> address or amount data, for privacy reasons — so ElliGAT operates one step
+> removed from the live chain. See [Live On-Chain Inference](#live-on-chain-inference-optional)
+> below for a path to running ElliGAT on freshly-fetched transactions.
+
+---
+
+## Solution
+
+ElliGAT is designed to address all three problems in one framework:
+
+**Heterophily-aware readout.**
+Instead of using only the node embedding `h_i`, ElliGAT appends the
+difference between a node and its neighbourhood mean: `[h_i ∥ h_i − μ(h_Nj)]`.
+This explicitly encodes *how different* a node is from its neighbours —
+a strong discriminative signal for fraud nodes surrounded by licit transactions.
+
+**Imbalance-robust training.**
+ElliGAT uses Focal Loss (α=0.80, γ=2.5) which down-weights easy licit
+examples and focuses training on hard fraud cases. The validation criterion
+is the harmonic mean of AUC and F1 — preventing the common failure mode
+where a model maximises AUC while F1 collapses on the minority class.
+
+**Temporal edge encoding.**
+Each edge carries a 16-dimensional encoding of |Δtimestep| between connected
+transactions. This lets the GATv2 attention mechanism learn that edges crossing
+large time gaps carry different information than edges within the same timestep,
+capturing the sequential structure of the Bitcoin transaction graph.
+
+**Two-phase training.**
+Phase 1 is self-supervised pre-training with a masked feature autoencoder
+(mask ratio 0.20), giving the model a strong initialisation before seeing
+any labels. Phase 2 fine-tunes with the combined Focal Loss on labelled nodes.
+
+**MetaEnsemble stacking.**
+A calibrated logistic regression meta-learner stacks ElliGAT's predictions
+with XGBoost, LightGBM, RandomForest, and MLP outputs. The tabular models
+capture feature patterns the GNN misses; the GNN captures graph structure
+the tabular models cannot access. Together they achieve higher F1 than
+any single model alone.
+
+----
+
+## Results
+
+All results are averaged over **5 random seeds** (42, 123, 2024, 17, 99) on the
+chronological 70/15/15 train/val/test split. EvolveGCN numbers are taken from
+the original paper (Pareja et al., 2020) as the model could not be reproduced
+under available GPU memory constraints.
+
+| Model | ROC-AUC | F1 | MCC |
+|---|---|---|---|
+| MLP | 0.9673 ± 0.0068 | 0.8206 ± 0.0047 | 0.8167 ± 0.0062 |
+| RandomForest | 0.9894 ± 0.0007 | 0.8441 ± 0.0021 | 0.8405 ± 0.0031 |
+| XGBoost | 0.9907 ± 0.0010 | 0.8508 ± 0.0147 | 0.8419 ± 0.0180 |
+| LightGBM | 0.9917 ± 0.0001 | 0.8770 ± 0.0038 | 0.8716 ± 0.0049 |
+| EvolveGCN (cited) | ~0.940 | ~0.720 | — |
+| BaselineGNN | 0.9250 ± 0.0039 | 0.7738 ± 0.0060 | 0.7672 ± 0.0070 |
+| **ElliGAT (ours)** | **0.9468 ± 0.0054** | **0.7925 ± 0.0104** | **0.7837 ± 0.0108** |
+| **MetaEnsemble (ours)** | **0.9870 ± 0.0014** | **0.8629 ± 0.0038** | **0.8570 ± 0.0037** |
+
+**ElliGAT vs EvolveGCN (cited):** +7.3% F1, +0.68% AUC  
+**MetaEnsemble vs EvolveGCN (cited):** +14.3% F1, +4.7% AUC
+
+> Precision: 0.8976 ± 0.0112 | Recall: 0.7096 ± 0.0131 | Balanced Acc: 0.8514 ± 0.0066  
+> Graph: 203,769 nodes · 468,710 undirected edges · 172 features/node
+
+---
+
+## Architecture
+
+```
+ElliGAT
+──────────────────────────────────────────────────────
+Input (172-d = 165 raw + 7 velocity features)
+  └─► Linear → LayerNorm → GELU          (hidden_dim = 256)
+  └─► 4 × GATv2Conv(heads=8)             + residual + LayerNorm
+        └── temporal edge encoding       (|Δtimestep| → 16-d)
+  └─► Heterophily readout: [h ∥ h − μ(h_N)]   (2×256 = 512-d)
+  └─► MLP classifier                     (512 → 256 → 128 → 1)
+
+Training
+  Phase 1 — self-supervised pre-training
+    • Masked feature autoencoder         (mask_ratio = 0.20)
+    • Warm-up + Cosine LR schedule
+  Phase 2 — fine-tuning
+    • Focal Loss                         (α = 0.80, γ = 2.5)
+    • Validation criterion: HM(AUC, F1) — prevents F1 collapse
+    • Early stopping on best HM score
+
+MetaEnsemble
+──────────────────────────────────────────────────────
+  Base models : ElliGAT · XGBoost · LightGBM · MLP · RandomForest
+  Meta-learner: isotonic-calibrated logistic regression (5-fold CV)
+```
+
+---
+
+## Key Design Choices vs Baseline
+
+| Feature | BaselineGNN | ElliGAT |
+|---|---|---|
+| Architecture | 3-layer GAT | 4-layer GATv2 |
+| Edge features | None | Temporal Δtimestep encoding |
+| Hidden dim / heads | 128 / 4 | 256 / 8 |
+| Heterophily readout | None | [h ∥ h − μ(h_N)] |
+| Pre-training | None | Masked feature autoencoder |
+| Loss function | Cross-entropy | Focal Loss (α=0.80, γ=2.5) |
+| LR schedule | Cosine | Warm-up + Cosine |
+| Validation criterion | AUC only | HM(AUC, F1) |
+| Velocity features | 5 | 7 (adds 24h count + std) |
+
+---
+
+## Project Structure
+
+```
+Bitcoin-Transaction-Fraud-Detection/
+├── main.py                ← Full pipeline entry point
+├── requirements.txt
+├── configs/
+│   └── config.py          ← All hyperparameters and paths
+└── src/
+    ├── data.py            ← Dataset loading, feature engineering, graph builder
+    ├── models.py          ← ElliGAT, EvolveGCN, BaselineGNN
+    ├── losses.py          ← FocalLoss, AsymmetricLoss, CombinedLoss
+    ├── trainer.py         ← Pre-training, fine-tuning, evaluation, MC Dropout
+    ├── baselines.py       ← Tabular models + MetaEnsemble stacker
+    ├── onchain.py         ← Live Bitcoin blockchain inference (Blockstream API)
+    ├── database.py        ← SQLite persistence for on-chain history + predictions
+    └── visualize.py       ← Results figures
+```
+
+---
+
+## Quick Start
+
+```bash
+git clone https://github.com/ria0304/Bitcoin-Transaction-Fraud-Detection-.git
+cd Bitcoin-Transaction-Fraud-Detection-
+
+pip install -r requirements.txt
+
+export BITCOIN_DATA_PATH="/path/to/elliptic-data-set"
+python main.py
+```
+
+Results are logged to `run_log.txt` during training.
+Metrics (mean ± std across 5 seeds) are printed to stdout on completion.
+
+> **No dataset?** Leave `BITCOIN_DATA_PATH` unset and the pipeline will attempt
+> auto-download via [KaggleHub](https://github.com/Kaggle/kagglehub).
+> You need a Kaggle account and `~/.kaggle/kaggle.json` credentials.
+
+---
+
+## Running on Google Colab (GPU)
+
+The full 5-seed pipeline takes approximately **46 minutes on a T4 GPU**.
+
+```python
+!git clone https://github.com/ria0304/Bitcoin-Transaction-Fraud-Detection- /content/elligat
+
+!pip install torch-geometric
+!pip install torch-scatter torch-sparse \
+    -f https://data.pyg.org/whl/torch-2.6.0+cu121.html
+!pip install lightgbm xgboost scikit-learn pandas numpy matplotlib
+
+%cd /content/elligat
+!python -u main.py 2>&1 | tee run_log.txt
+```
+
+Set Runtime → T4 GPU before running.
+
+---
+
+## Dataset
+
+| Statistic | Value |
+|---|---|
+| Transactions (nodes) | 203,769 |
+| Payment flows (directed edges) | 234,355 → 468,710 undirected |
+| Features per node | 172 (165 raw + 7 velocity) |
+| Labelled transactions | 46,564 (~22.9%) |
+| Fraud class ratio | 9.76% |
+| Train / Val / Test split | 32,594 / 6,984 / 6,986 (chronological) |
+
+---
+
+## Tech Stack
+
+| Category | Tools |
+|---|---|
+| Deep Learning | PyTorch, PyTorch Geometric |
+| GNN Layers | GATv2Conv, SAGEConv |
+| ML Models | XGBoost, LightGBM, RandomForest, Scikit-learn MLP |
+| Meta-learner | Scikit-learn LogisticRegression (isotonic calibration) |
+| Data | Pandas, NumPy |
+| Visualisation | Matplotlib |
+
+---
+
+## Live On-Chain Inference
+
+The Elliptic dataset is a static snapshot. `src/onchain.py` extends the
+pipeline to **real** Bitcoin data: it fetches the most recently confirmed
+block from a public blockchain API (Blockstream's Esplora, no API key
+required), reconstructs a feature graph from the raw transaction data, and
+runs the trained ElliGAT model on it.
+
+```bash
+pip install requests   # if not already installed
+python -m src.onchain --num-tx 200 --top-k 15 --checkpoint outputs/best_model.pt
+```
+
+This will:
+1. Fetch the latest confirmed block and up to `--num-tx` of its transactions
+   (full input/output/fee data) from `blockstream.info/api`.
+2. Build payment-flow edges between fetched transactions the same way
+   `src/data.py` builds them from `elliptic_txs_edgelist.csv` — an edge
+   `A → B` exists if transaction `B` spends an output of transaction `A`.
+3. Compute the 7 velocity features (`Amount_log`, `tx_count_1h`, etc.) for
+   real, using the same definitions as `src/data.py::add_velocity_features`.
+4. Load `outputs/best_model.pt` (produced by `main.py`) and print the
+   transactions with the highest predicted fraud probability.
+
+**Important limitation:** the Elliptic dataset's other 166 raw node
+features are a proprietary, undocumented transformation of on-chain
+data — their exact definitions were never released, so they cannot be
+reconstructed from a public API and are zero-imputed for live transactions
+(see the docstring in `src/onchain.py` for the full breakdown). Only
+7 of 173 input dimensions are "real" for live data. Treat this module as
+a **deployment feasibility demo**, not a like-for-like comparison to the
+Elliptic benchmark numbers above — it shows the pipeline can ingest and
+score genuine on-chain data end-to-end, not that it matches benchmark
+accuracy on it.
+
+---
+
+## Persistence (SQLite)
+
+`src/database.py` adds a small SQLite database (`outputs/onchain_history.db`
+by default — a single file, no server, ships with Python's standard
+library) that backs the live on-chain path:
+
+- **Transaction history.** Every transaction `src/onchain.py` fetches is
+  upserted into a `transactions` table instead of being discarded when the
+  script exits. This means `tx_count_1h`, `tx_count_24h`, `amount_sum_1h`,
+  and `amount_std_1h` are computed from **real accumulated rolling
+  windows** across repeated runs, not a single-block snapshot. Run the
+  script a few times over a couple of hours (e.g. via cron) and these
+  features become genuinely meaningful; on a brand-new database they fall
+  back gracefully to block-level aggregates.
+- **Prediction log.** Every inference run logs `(txid, fraud_probability,
+  checkpoint_path, timestamp)` to a `predictions` table, so past scoring
+  runs are auditable instead of print-and-forget.
+
+```bash
+python -m src.onchain --num-tx 200 --checkpoint outputs/best_model.pt --db-path outputs/onchain_history.db
+```
+
+Why SQLite and not Postgres/MySQL/Neo4j: this is a local, single-user
+research pipeline, not a deployed multi-writer service — SQLite needs zero
+setup, handles the data volumes here comfortably, and the entire history
+is one portable file you can inspect with any SQLite browser. If this
+project is ever turned into a deployed service with concurrent writers,
+`src/database.py`'s functions are a thin enough wrapper to swap for a
+Postgres connection string with the same query shapes.
+
+---
+
+## Citation
+
+If you use this work, please cite the Elliptic dataset:
+
+```bibtex
+@inproceedings{weber2019anti,
+  title     = {Anti-Money Laundering in Bitcoin: Experimenting with
+               Graph Convolutional Networks for Financial Forensics},
+  author    = {Weber, Mark and Domeniconi, Giacomo and Chen, Jie and
+               Weidele, Daniel Karl I. and Bellei, Claudio and
+               Robinson, Tom and Leiserson, Charles E.},
+  booktitle = {KDD Workshop on Anomaly Detection in Finance},
+  year      = {2019}
+}
+```
+
+And EvolveGCN if citing the baseline:
+
+```bibtex
+@inproceedings{pareja2020evolvegcn,
+  title     = {EvolveGCN: Evolving Graph Convolutional Networks for Dynamic Graphs},
+  author    = {Pareja, Aldo and Domeniconi, Giacomo and Chen, Jie and
+               Ma, Tengfei and Suzumura, Toyotaro and Kanezashi, Hiroki and
+               Kaler, Tim and Schardl, Tao and Leiserson, Charles},
+  booktitle = {AAAI},
+  year      = {2020}
+}
+```

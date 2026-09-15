@@ -1,0 +1,7 @@
+ElliGAT-ASL novelty run (synthetic verification, CPU)
+loss=asymmetric (gamma_pos=0.0, gamma_neg=4.0, clip=0.05) seeds=[42,123,2024,17,99]
+Synthetic check (N=1000, 10% fraud): ASL loss=0.1113, Focal loss=0.0720
+Logger: outputs/run_log.txt (file+console dual handler) verified.
+Full pipeline BLOCKED: Elliptic dataset not found locally, no Kaggle creds, xgboost/lightgbm unavailable in this env.
+To run full: set BITCOIN_DATA_PATH to elliptic folder, pip install xgboost lightgbm, then: python main.py 2>&1 | tee outputs/run_log_final.txt
+Code changes ready: src/logger.py, src/losses.py CombinedASLLoss, configs/config.py LOSS_NAME/ASL_*, src/trainer.py loss_name switch, main.py logger + summary.
