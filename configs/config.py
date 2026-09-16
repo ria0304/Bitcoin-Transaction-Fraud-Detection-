@@ -16,6 +16,16 @@ NUM_HEADS       = 8            # More attention heads
 DROPOUT         = 0.3
 EDGE_DIM        = 16           # Edge feature projection dim (temporal edges)
 
+# Temporal edge encoding on |Δtimestep|:
+#   "sinusoidal" — fixed multi-scale sin/cos basis + learned projection (default)
+#   "mlp"        — legacy Linear(1→d)→GELU→Linear(d→d); reproduces the verified
+#                  5-seed results reported in the README
+EDGE_ENCODING   = os.environ.get("EDGE_ENCODING", "sinusoidal")
+# Largest wavelength in the sinusoidal basis. Elliptic deltas span [0, 48],
+# so 100 keeps every channel informative; 10000 (the NLP default) would make
+# the upper channels near-constant over this range.
+EDGE_MAX_PERIOD = float(os.environ.get("EDGE_MAX_PERIOD", 100.0))
+
 # ─── Training ─────────────────────────────────────────────────────────────────
 LEARNING_RATE   = 5e-4
 WEIGHT_DECAY    = 1e-4
