@@ -39,19 +39,116 @@ from torch_geometric.utils import degree
 # ─── Utility: Sinusoidal temporal encoding ───────────────────────────────────
 
 class TemporalEdgeEncoder(nn.Module):
-    """Project scalar timestep-delta into a d-dim sinusoidal embedding."""
+    """
+    Encode the scalar timestep-delta |Δt| carried by each edge into a
+    d_out-dimensional vector consumed by GATv2's edge-aware attention.
 
-    def __init__(self, d_out: int):
+    Two modes
+    ---------
+    mode="sinusoidal" (default)
+        Transformer-style fixed sin/cos positional encoding (Vaswani et al.,
+        2017) on the scalar delta, followed by a small learned projection:
+
+            PE(Δ, 2i)   = sin(Δ / P^(2i/d))
+            PE(Δ, 2i+1) = cos(Δ / P^(2i/d))
+
+        The fixed basis gives the model a *smooth, multi-scale* view of the
+        delta for free: low-index channels vary rapidly (discriminating
+        Δ=0 from Δ=1, i.e. within-timestep vs adjacent-timestep edges),
+        high-index channels vary slowly (discriminating Δ≈2 from Δ≈40,
+        i.e. short-range vs long-range temporal hops). A 2-layer MLP on a
+        raw scalar has to *learn* that multi-scale structure from the
+        supervised signal alone, and with only one input dimension it has
+        very little to work with.
+
+        Because Elliptic deltas lie in [0, 48] rather than the thousands of
+        token positions the original formulation targets, ``max_period``
+        defaults to 100 instead of 10000 — with P=10000 the upper channels
+        would be near-constant across the entire observed range and would
+        contribute nothing.
+
+        The learned projection after the fixed basis keeps the layer at
+        least as expressive as the legacy MLP: it can in principle recover
+        a comparable mapping, but starts from a far better-conditioned
+        representation.
+
+    mode="mlp" (legacy)
+        The original implementation: ``Linear(1→d) → GELU → Linear(d→d)``
+        applied directly to the raw scalar. Retained because the verified
+        5-seed results in the README were produced with this path — set
+        ``EDGE_ENCODING="mlp"`` to reproduce them exactly.
+
+    Parameters
+    ----------
+    d_out : int
+        Output dimensionality (must be even for ``mode="sinusoidal"``);
+        matches ``EDGE_DIM`` and the ``edge_dim`` argument of GATv2Conv.
+    mode : {"sinusoidal", "mlp"}
+    max_period : float
+        Largest wavelength in the sinusoidal basis. Should be on the order
+        of the maximum expected |Δt| (49 timesteps in Elliptic).
+    """
+
+    def __init__(
+        self,
+        d_out: int,
+        mode: str = "sinusoidal",
+        max_period: float = 100.0,
+    ):
         super().__init__()
+        if mode not in ("sinusoidal", "mlp"):
+            raise ValueError(
+                f"TemporalEdgeEncoder: mode must be 'sinusoidal' or 'mlp', got {mode!r}"
+            )
+        self.mode       = mode
+        self.d_out      = d_out
+        self.max_period = max_period
+
+        if mode == "mlp":
+            self.proj = nn.Sequential(
+                nn.Linear(1, d_out),
+                nn.GELU(),
+                nn.Linear(d_out, d_out),
+            )
+            return
+
+        if d_out % 2 != 0:
+            raise ValueError(
+                f"TemporalEdgeEncoder: sinusoidal mode needs an even d_out, got {d_out}"
+            )
+
+        # Fixed (non-learned) inverse frequencies — registered as a buffer so
+        # they move with .to(device) and are saved in the state_dict, but are
+        # never updated by the optimiser.
+        half     = d_out // 2
+        exponent = torch.arange(half, dtype=torch.float) / half
+        inv_freq = 1.0 / (max_period ** exponent)          # (d_out/2,)
+        self.register_buffer("inv_freq", inv_freq, persistent=True)
+
+        # Learned projection on top of the fixed basis.
         self.proj = nn.Sequential(
-            nn.Linear(1, d_out),
+            nn.Linear(d_out, d_out),
             nn.GELU(),
             nn.Linear(d_out, d_out),
         )
 
     def forward(self, edge_attr: torch.Tensor) -> torch.Tensor:
-        # edge_attr: (E, 1)  float timestep delta
-        return self.proj(edge_attr)
+        """
+        Parameters
+        ----------
+        edge_attr : (E, 1) float tensor of |Δtimestep| per edge.
+
+        Returns
+        -------
+        (E, d_out) edge embedding.
+        """
+        if self.mode == "mlp":
+            return self.proj(edge_attr)
+
+        delta = edge_attr.view(-1, 1)                       # (E, 1)
+        ang   = delta * self.inv_freq.unsqueeze(0)          # (E, d_out/2)
+        pe    = torch.cat([torch.sin(ang), torch.cos(ang)], dim=-1)   # (E, d_out)
+        return self.proj(pe)
 
 
 # ─── Proposed Model: ElliGAT ─────────────────────────────────────────────────
@@ -78,6 +175,8 @@ class ElliGAT(nn.Module):
         heads: int = 8,
         dropout: float = 0.3,
         edge_dim: int = 16,
+        edge_encoding: str = "sinusoidal",
+        edge_max_period: float = 100.0,
     ):
         super().__init__()
         self.dropout    = dropout
@@ -86,7 +185,12 @@ class ElliGAT(nn.Module):
         self.hidden_dim = hidden_dim
 
         # Temporal edge encoder
-        self.edge_enc = TemporalEdgeEncoder(edge_dim)
+        # edge_encoding="sinusoidal" (default) — fixed sin/cos basis on |Δt|
+        # edge_encoding="mlp"                  — legacy path, reproduces the
+        #                                        verified 5-seed README results
+        self.edge_enc = TemporalEdgeEncoder(
+            edge_dim, mode=edge_encoding, max_period=edge_max_period
+        )
 
         # Input projection
         self.input_proj = nn.Sequential(
