@@ -86,35 +86,140 @@ Averaged over **5 random seeds** (42, 123, 2024, 17, 99), chronological 70/15/15
 > Precision: 0.8976 ± 0.0112 | Recall: 0.7096 ± 0.0131 | Balanced Acc: 0.8514 ± 0.0066
 > Graph: 203,769 nodes · 468,710 undirected edges · 172 features/node
 
-This table reflects the Focal Loss configuration. `configs/config.py` currently defaults `LOSS_NAME` to `asymmetric` (see below) — re-running `main.py` as-is today will not reproduce this exact table until `LOSS_NAME=focal` is set, or until the ASL run below is completed and its own numbers replace this table.
+`main.py` also instantiates two further temporal-graph baselines, **ROLAND** (Wang et al., 2022) and **TGN** (Rossi et al., 2020), in `src/baselines.py`. They were added after the verified run and have no results row yet.
+
+These numbers were produced with `LOSS_NAME=focal` **and** the legacy `mlp` edge encoder. Both are no longer the defaults: `configs/config.py` now ships `LOSS_NAME=asymmetric` and `EDGE_ENCODING=sinusoidal`. To reproduce this exact table, set `LOSS_NAME=focal EDGE_ENCODING=mlp`. The sinusoidal encoder is a genuine architecture change and has no results row yet — it is untested against this baseline.
 
 ---
 
 ## Architecture
 
+### System pipeline
+
+```mermaid
+flowchart TD
+    A["Elliptic CSVs<br/>features · edgelist · classes"]:::gray
+    B["src/data.py<br/>+7 velocity features<br/>chronological 70/15/15 split"]:::teal
+    C["PyG Data object<br/>203,769 nodes · 468,710 edges<br/>172-d x · edge_attr = |Δt|"]:::teal
+    D["Phase 1 — pretrain()<br/>masked feature autoencoder<br/>mask_ratio 0.20 · MSE on masked nodes"]:::blue
+    E["Phase 2 — train_gnn()<br/>CombinedASLLoss or CombinedLoss<br/>+ λc · NT-Xent(FAGA views) + λp<br/>warm-up + cosine · early stop on HM(AUC,F1)"]:::blue
+    F["evaluate_gnn()<br/>MC Dropout on val → fit AUGT thresholds<br/>→ uncertainty-gated decision on test → AURC"]:::blue
+    G["Graph baselines<br/>EvolveGCN · BaselineGNN (SAGE)<br/>ROLAND · TGN"]:::gray
+    H["Tabular baselines<br/>MLP · RF · XGBoost · LightGBM"]:::gray
+    I["MetaEnsemble<br/>isotonic-calibrated LogisticRegression"]:::amber
+    J["Post-hoc analysis<br/>PLP pseudo-labels · GNNExplainer<br/>heterophily scores · plots"]:::amber
+
+    A --> B --> C
+    C --> D --> E --> F
+    C --> G
+    C --> H
+    F --> I
+    G --> I
+    H --> I
+    F --> J
+
+    classDef gray   fill:#e8e6e1,stroke:#9c9a92,color:#2C2C2A
+    classDef teal   fill:#E1F5EE,stroke:#0F6E56,color:#085041
+    classDef blue   fill:#E6F1FB,stroke:#185FA5,color:#0C447C
+    classDef amber  fill:#FAEEDA,stroke:#854F0B,color:#633806
 ```
-ElliGAT
-──────────────────────────────────────────────────────
-Input (172-d = 165 raw + 7 velocity features)
-  └─► Linear → LayerNorm → GELU          (hidden_dim = 256)
-  └─► 4 × GATv2Conv(heads=8)             + residual + LayerNorm
-        └── temporal edge encoding       (|Δtimestep| → 16-d)
-  └─► Heterophily readout: [h ∥ h − μ(h_N)]   (2×256 = 512-d)
-  └─► MLP classifier                     (512 → 256 → 128 → 1)
 
-Training
-  Phase 1 — self-supervised pre-training
-    • Masked feature autoencoder         (mask_ratio = 0.20)
-    • Warm-up + Cosine LR schedule
-  Phase 2 — fine-tuning
-    • Focal Loss (default in verified run) or Asymmetric Loss (current config default)
-    • Validation criterion: HM(AUC, F1) — prevents F1 collapse
-    • Early stopping on best HM score
+### ElliGAT model internals
 
-MetaEnsemble
-──────────────────────────────────────────────────────
-  Base models : ElliGAT · XGBoost · LightGBM · MLP · RandomForest
-  Meta-learner: isotonic-calibrated logistic regression (5-fold CV)
+```mermaid
+flowchart TD
+    X["x : (N, 172)<br/>165 raw + 7 velocity"]:::inp
+    EA["edge_attr : (E, 1)<br/>|Δtimestep|"]:::inp
+    EE["TemporalEdgeEncoder<br/>fixed sin/cos basis (max_period=100)<br/>→ Linear(16→16) → GELU → Linear(16→16)"]:::edge
+    IP["input_proj<br/>Linear(172→256) → LayerNorm → GELU"]:::enc
+    G1["GATv2Conv ×4<br/>256 → 8 heads × 32, concat → 256<br/>edge_dim=16 injected into attention<br/>h = LayerNorm(GELU(conv) + skip(h)) → dropout 0.3"]:::enc
+    HR["Heterophily readout<br/>concat[ h , h − mean(h_N) ] → (N, 512)"]:::het
+    CLS["classifier<br/>512 → 256 → 128 → 1<br/>GELU + dropout"]:::head
+    PT["pretrain_head<br/>256 → 256 → 172<br/>(Phase 1 only)"]:::aux
+    CT["contrast_head<br/>256 → 256 → 128<br/>NT-Xent, τ=0.07 (Phase 2 aux)"]:::aux
+    HS["heterophily_score()<br/>‖h − mean(h_N)‖₂ → (N,)<br/>interpretable fraud signal"]:::aux
+    OUT["fraud logit (N,)<br/>→ MC Dropout → AUGT decision"]:::head
+
+    EA --> EE --> G1
+    X --> IP --> G1
+    G1 -->|"h : (N,256)"| HR --> CLS --> OUT
+    G1 -.-> PT
+    G1 -.-> CT
+    HR -.-> HS
+
+    classDef inp   fill:#e8e6e1,stroke:#9c9a92,color:#2C2C2A
+    classDef edge  fill:#FAEEDA,stroke:#854F0B,color:#633806
+    classDef enc   fill:#E6F1FB,stroke:#185FA5,color:#0C447C
+    classDef het   fill:#E1F5EE,stroke:#0F6E56,color:#085041
+    classDef head  fill:#E1F5EE,stroke:#0F6E56,color:#085041
+    classDef aux   fill:#f3eaf7,stroke:#6b3f8a,color:#3f2452
+```
+
+### Layer reference
+
+| Stage | Component | Shape / config |
+|---|---|---|
+| Input | Node features | `(N, 172)` — 165 raw + 7 velocity |
+| Input | Edge features | `(E, 1)` — `\|Δtimestep\|` |
+| Edge encoder | `TemporalEdgeEncoder` | **sinusoidal** (default): fixed sin/cos basis on `\|Δt\|`, `max_period=100` → `Linear(16→16) → GELU → Linear(16→16)`<br/>**mlp** (legacy): `Linear(1→16) → GELU → Linear(16→16)` |
+| Encoder | `input_proj` | `Linear(172→256) → LayerNorm → GELU` |
+| Encoder | `GATv2Conv × 4` | `256 → 8 heads × 32 (concat)`, `edge_dim=16`, `dropout=0.3`, residual via `Linear(256→256, bias=False)` + `LayerNorm` |
+| Readout | Heterophily concat | `(N, 512)` = `[h ∥ h − μ(h_N)]`, neighbour mean via degree-normalised `scatter_add` |
+| Head | `classifier` | `512 → 256 → 128 → 1`, GELU + dropout |
+| Aux head | `pretrain_head` | `256 → 256 → 172` (Phase 1 reconstruction) |
+| Aux head | `contrast_head` | `256 → 256 → 128` (NT-Xent, τ = 0.07) |
+| Signal | `heterophily_score()` | `(N,)` L2 norm of the difference term |
+
+### Training protocol
+
+```
+Phase 1 — pretrain()                     src/trainer.py
+  • Mask 20% of node features to zero, encode, reconstruct via pretrain_head
+  • MSE on masked nodes only · warm-up + cosine LR
+
+Phase 2 — train_gnn()                    src/trainer.py
+  • loss_name = "asymmetric" (config default) → CombinedASLLoss
+    loss_name = "focal"                       → CombinedLoss   ← verified Results table
+  • + λc · NT-Xent over two FAGA views (src/augmentation.py::augment_pair)
+  • + λp · pre-train reconstruction term
+  • Early stopping on HM(AUC, F1), patience 30, max 300 epochs
+
+Evaluation — evaluate_gnn()              src/trainer.py
+  • MC Dropout (n=20) on val → per-node mean prob + uncertainty
+  • fit_augt_thresholds(base_low, base_high, k) on val
+  • Uncertainty-gated decision rule on test → metrics + AURC / coverage
+  • Falls back to a static grid-searched threshold if val has one class only
+
+Phase 3 (post-hoc) — run_plp()           src/pseudo_label.py
+  • MC Dropout over all nodes → pseudo-label confident unlabelled nodes
+  • Re-train with down-weighted pseudo-label loss
+```
+
+### Temporal edge encoding
+
+`TemporalEdgeEncoder` supports two modes, selected by `EDGE_ENCODING` in
+`configs/config.py` (or the env var of the same name):
+
+| Mode | Encoding | Use |
+|---|---|---|
+| `sinusoidal` *(default)* | Fixed Transformer-style sin/cos basis on the scalar `\|Δt\|`, then a learned 2-layer projection | Gives the attention mechanism a smooth, multi-scale view of the temporal gap for free — fast-varying channels separate Δ=0 from Δ=1 (within- vs adjacent-timestep edges), slow-varying channels separate short from long temporal hops |
+| `mlp` *(legacy)* | `Linear(1→16) → GELU → Linear(16→16)` on the raw scalar | Reproduces the verified 5-seed results in the table above, which were produced with this path |
+
+`max_period` defaults to **100**, not the NLP-standard 10000. Elliptic deltas
+lie in `[0, 48]`; at `max_period=10000` the two highest-index channels vary by
+less than `1e-3` across that entire range and contribute nothing, whereas at
+100 all 16 channels stay informative.
+
+> **One place where code and docstring still disagree, kept honest here:**
+> `_heterophily_readout` aggregates over `edge_index` as stored (`row → col`),
+> so on the undirected graph it is a symmetric neighbourhood mean, not a
+> directional predecessor mean.
+
+### MetaEnsemble
+
+```
+Base models : ElliGAT · EvolveGCN · BaselineGNN · ROLAND · TGN · MLP · RF · XGBoost · LightGBM
+Stacker     : isotonic-calibrated LogisticRegression (5-fold CV) over base probabilities
 ```
 
 ---
