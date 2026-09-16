@@ -131,6 +131,11 @@ def load_elliptic(path: str):
     if os.path.exists(edges_path):
         el = pd.read_csv(edges_path, header=None)
         el.columns = ["txId1", "txId2"]
+        # Robust to edgelist copies with a header row ("txId1,txId2"):
+        # drop any non-numeric rows so the id mask below can match.
+        el = el[pd.to_numeric(el["txId1"], errors="coerce").notna()]
+        el = el[pd.to_numeric(el["txId2"], errors="coerce").notna()]
+        el = el.astype({"txId1": "int64", "txId2": "int64"})
         mask = el["txId1"].isin(txid_to_idx) & el["txId2"].isin(txid_to_idx)
         el = el[mask]
 

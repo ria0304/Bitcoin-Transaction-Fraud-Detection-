@@ -1,0 +1,34 @@
+2026-09-16 10:35:07 | INFO    | Novelty: ElliGAT-ASL loss=asymmetric gamma_pos=0.0 gamma_neg=4.0
+
+============================================================
+  Bitcoin Fraud Detection — ElliGAT
+  Device : cpu
+  Output : ./outputs
+============================================================
+
+Step 1: Loading Elliptic Bitcoin dataset …
+  [check] not a directory: /home/user/.cache/kagglehub/datasets/ellipticco/elliptic-data-set/versions/1/elliptic_bitcoin_dataset/elliptic
+  [check] found dataset one level under: /home/user/.cache/kagglehub/datasets/ellipticco/elliptic-data-set/versions/1/elliptic_bitcoin_dataset
+  Path: /home/user/.cache/kagglehub/datasets/ellipticco/elliptic-data-set/versions/1/elliptic_bitcoin_dataset
+  Loaded edges: 234355 directed → 468710 undirected
+  [Elliptic] 203,769 total | 46,564 labelled | Fraud: 0.0976
+
+Step 2: Engineering velocity features …
+
+Step 3: Chronological train/val/test split (70/15/15) …
+  Train: 32,594  Val: 6,984  Test: 6,986
+  Tabular features: 172 (7 velocity + 165 raw)
+  Class balance — Fraud: 3753 (11.514%)
+
+Step 4: Building Bitcoin transaction graph …
+  Nodes: 203,769  Edges: 468,710  Features/node: 172
+
+Step 5: Multi-seed experiments (5 seeds) …
+
+
+────────────────────────────────────────────────────────────
+  SEED 42
+────────────────────────────────────────────────────────────
+
+  [ElliGAT — 4-layer GATv2 + temporal edges + heterophily]
+    Phase 1: Self-supervised pre-training …
