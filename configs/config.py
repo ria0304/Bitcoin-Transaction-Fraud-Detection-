@@ -6,14 +6,31 @@ Bitcoin Fraud Detection project.
 """
 import os
 
+
+# ─── Env-override helpers (empty/unset env var -> default) ────────────────────
+def _env(name, default, cast=str):
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    return cast(raw.strip())
+
+
+def _env_int_list(name, default):
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return list(default)
+    return [int(x) for x in raw.replace(" ", "").split(",") if x]
+
+
 # ─── Reproducibility ──────────────────────────────────────────────────────────
-SEEDS = [42, 123, 2024, 17, 99]
+# SEEDS env var: comma-separated, e.g. SEEDS=42,123,2024
+SEEDS = _env_int_list("SEEDS", [42, 123, 2024, 17, 99])
 
 # ─── Model Architecture ───────────────────────────────────────────────────────
-HIDDEN_DIM      = 256          # Wider hidden dim for better expressiveness
-NUM_GAT_LAYERS  = 4            # Deeper than baseline (was 3)
-NUM_HEADS       = 8            # More attention heads
-DROPOUT         = 0.3
+HIDDEN_DIM      = _env("HIDDEN_DIM", 256, int)          # Wider hidden dim for better expressiveness
+NUM_GAT_LAYERS  = _env("NUM_GAT_LAYERS", 4, int)            # Deeper than baseline (was 3)
+NUM_HEADS       = _env("NUM_HEADS", 8, int)            # More attention heads
+DROPOUT         = _env("DROPOUT", 0.3, float)
 EDGE_DIM        = 16           # Edge feature projection dim (temporal edges)
 
 # Temporal edge encoding on |Δtimestep|:
@@ -27,19 +44,19 @@ EDGE_ENCODING   = os.environ.get("EDGE_ENCODING", "sinusoidal")
 EDGE_MAX_PERIOD = float(os.environ.get("EDGE_MAX_PERIOD", 100.0))
 
 # ─── Training ─────────────────────────────────────────────────────────────────
-LEARNING_RATE   = 5e-4
-WEIGHT_DECAY    = 1e-4
-EPOCHS          = 300
-PATIENCE        = 30           # Larger patience for deeper model
+LEARNING_RATE   = _env("LEARNING_RATE", 5e-4, float)
+WEIGHT_DECAY    = _env("WEIGHT_DECAY", 1e-4, float)
+EPOCHS          = _env("EPOCHS", 300, int)
+PATIENCE        = _env("PATIENCE", 30, int)           # Larger patience for deeper model
 LR_WARMUP_STEPS = 10
-MC_SAMPLES      = 30           # Monte Carlo dropout passes
+MC_SAMPLES      = _env("MC_SAMPLES", 30, int)           # Monte Carlo dropout passes
 
 # ─── Focal Loss ───────────────────────────────────────────────────────────────
 FOCAL_ALPHA     = 0.80         # Higher weight on minority (fraud) class
 FOCAL_GAMMA     = 2.5
 
 # ─── Self-supervised Pre-training ─────────────────────────────────────────────
-PRETRAIN_EPOCHS = 50
+PRETRAIN_EPOCHS = _env("PRETRAIN_EPOCHS", 50, int)
 MASK_RATIO      = 0.20         # Fraction of nodes masked for feature reconstruction
 
 # ─── Contrastive Learning ─────────────────────────────────────────────────────
