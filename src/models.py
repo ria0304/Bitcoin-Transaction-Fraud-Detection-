@@ -28,12 +28,18 @@ Novel contributions (journal version)
    MC Dropout uncertainty estimation and pseudo-label generation.
 """
 
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import GATv2Conv, SAGEConv, GCNConv
+from torch.utils.checkpoint import checkpoint as _ckpt
+
 from torch_geometric.nn import global_mean_pool
 from torch_geometric.utils import degree
+
+# Set GRAD_CHECKPOINT=0 to disable (faster, but needs far more RAM).
+_GRAD_CKPT = os.environ.get("GRAD_CHECKPOINT", "1").strip().lower() not in ("0", "false", "no", "")
 
 
 # ─── Utility: Sinusoidal temporal encoding ───────────────────────────────────
@@ -257,11 +263,28 @@ class ElliGAT(nn.Module):
         if edge_attr is not None:
             e = self.edge_enc(edge_attr)   # (E, edge_dim)
 
+        # Gradient checkpointing: each GATv2 layer materialises several
+        # (E x hidden) tensors (~0.7 GB each on Elliptic). Fine-tuning runs
+        # 4 full-graph forwards per epoch (main + 2 FAGA views + pretrain),
+        # which OOMs CPU runners. Checkpointing keeps only layer inputs and
+        # recomputes the rest in backward (same maths, RNG state preserved).
+        use_ckpt = (
+            _GRAD_CKPT and self.training and torch.is_grad_enabled()
+        )
         for conv, norm, skip in zip(self.convs, self.norms, self.skips):
-            h2 = F.gelu(conv(h, edge_index, edge_attr=e))
-            h  = norm(h2 + skip(h))
-            h  = F.dropout(h, p=self.dropout, training=self.training)
+            if use_ckpt:
+                h = _ckpt(
+                    self._layer_fn, conv, norm, skip, h, edge_index, e,
+                    use_reentrant=False,
+                )
+            else:
+                h = self._layer_fn(conv, norm, skip, h, edge_index, e)
         return h
+
+    def _layer_fn(self, conv, norm, skip, h, edge_index, e):
+        h2 = F.gelu(conv(h, edge_index, edge_attr=e))
+        h  = norm(h2 + skip(h))
+        return F.dropout(h, p=self.dropout, training=self.training)
 
     def _heterophily_readout(
         self,
