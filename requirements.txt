@@ -1,0 +1,23 @@
+# Core (CI installs the CPU build of torch 2.6.0 first and pins it via constraints)
+torch>=2.2.0
+torch_geometric>=2.5.0
+
+# NOTE: torch_scatter / torch_sparse / torch_cluster are intentionally NOT listed.
+# No code in this repo imports them, and building them from source fails on pip.
+
+# ML & Data
+numpy>=1.26
+pandas>=2.2
+scikit-learn>=1.4
+scipy>=1.12
+
+# Tabular boosting
+xgboost>=2.0
+lightgbm>=4.3
+
+# Config / dataset helpers
+python-dotenv>=1.0
+kagglehub>=0.2
+
+# Viz
+matplotlib>=3.8

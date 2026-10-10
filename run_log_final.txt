@@ -1,0 +1,197 @@
+
+============================================================
+  Bitcoin Fraud Detection — ElliGAT
+  Device : cuda
+  Output : outputs
+============================================================
+
+Step 1: Loading Elliptic Bitcoin dataset …
+  Path: /content/elligat/data/elliptic_bitcoin_dataset
+  Loaded edges: 234355 directed → 468710 undirected
+  [Elliptic] 203,769 total | 46,564 labelled | Fraud: 0.0976
+
+Step 2: Engineering velocity features …
+
+Step 3: Chronological train/val/test split (70/15/15) …
+  Train: 32,594  Val: 6,984  Test: 6,986
+  Tabular features: 172 (7 velocity + 165 raw)
+  Class balance — Fraud: 3753 (11.514%)
+
+Step 4: Building Bitcoin transaction graph …
+  Nodes: 203,769  Edges: 468,710  Features/node: 172
+
+Step 5: Multi-seed experiments (5 seeds) …
+
+
+────────────────────────────────────────────────────────────
+  SEED 42
+────────────────────────────────────────────────────────────
+
+  [ElliGAT — 4-layer GATv2 + temporal edges + heterophily]
+    Phase 1: Self-supervised pre-training …
+    Phase 2: Fine-tuning with combined loss …
+    [finetune] ep 020 | loss=19.4083 | AUC=0.8479 | F1=0.4134 | score=0.5558
+    [finetune] ep 040 | loss=4.3552 | AUC=0.8857 | F1=0.5611 | score=0.6870
+    [finetune] ep 060 | loss=9.6404 | AUC=0.9144 | F1=0.6773 | score=0.7782
+    [finetune] ep 080 | loss=21.9571 | AUC=0.9354 | F1=0.6637 | score=0.7765
+    [finetune] ep 100 | loss=4.2643 | AUC=0.9317 | F1=0.6741 | score=0.7822
+    [finetune] ep 120 | loss=0.4875 | AUC=0.9273 | F1=0.6874 | score=0.7895
+    [finetune] ep 140 | loss=3.7189 | AUC=0.9248 | F1=0.6652 | score=0.7739
+    Early stopping at epoch 153
+    → AUC=0.9465  F1=0.8050  MCC=0.7952
+    → AUC=0  F1=0  MCC=0  # EvolveGCN disabled
+
+  [BaselineGNN — GraphSAGE ablation]
+    → AUC=0.9195  F1=0.7823  MCC=0.7771
+
+  [Tabular baselines]
+  MLP             AUC=0.9553 F1=0.8190 MCC=0.8168
+  XGBoost         AUC=0.9905 F1=0.8648 MCC=0.8598
+  LightGBM        AUC=0.9918 F1=0.8772 MCC=0.8732
+  RandomForest    AUC=0.9899 F1=0.8471 MCC=0.8447
+
+  [MetaEnsemble — stacked GNN + tabular]
+  MetaEnsemble     AUC=0.9816 F1=0.8653 MCC=0.8591
+    → AUC=0.9816  F1=0.8653  MCC=0.8591
+
+────────────────────────────────────────────────────────────
+  SEED 123
+────────────────────────────────────────────────────────────
+
+  [ElliGAT — 4-layer GATv2 + temporal edges + heterophily]
+    Phase 1: Self-supervised pre-training …
+    Phase 2: Fine-tuning with combined loss …
+    [finetune] ep 020 | loss=14.3735 | AUC=0.8144 | F1=0.3412 | score=0.4809
+    [finetune] ep 040 | loss=6.9060 | AUC=0.8907 | F1=0.5839 | score=0.7054
+    [finetune] ep 060 | loss=4.8238 | AUC=0.9195 | F1=0.6789 | score=0.7811
+    [finetune] ep 080 | loss=4.0879 | AUC=0.9360 | F1=0.6815 | score=0.7887
+    [finetune] ep 100 | loss=0.1279 | AUC=0.9354 | F1=0.6928 | score=0.7961
+    [finetune] ep 120 | loss=11.9521 | AUC=0.9370 | F1=0.6975 | score=0.7997
+    [finetune] ep 140 | loss=16.6319 | AUC=0.9289 | F1=0.6981 | score=0.7972
+    [finetune] ep 160 | loss=10.6965 | AUC=0.9303 | F1=0.6975 | score=0.7972
+    Early stopping at epoch 175
+    → AUC=0.9484  F1=0.7958  MCC=0.7872
+    → AUC=0  F1=0  MCC=0  # EvolveGCN disabled
+
+  [BaselineGNN — GraphSAGE ablation]
+    → AUC=0.9299  F1=0.7747  MCC=0.7651
+
+  [Tabular baselines]
+  MLP             AUC=0.9756 F1=0.8166 MCC=0.8082
+  XGBoost         AUC=0.9890 F1=0.8252 MCC=0.8108
+  LightGBM        AUC=0.9919 F1=0.8715 MCC=0.8642
+  RandomForest    AUC=0.9897 F1=0.8419 MCC=0.8370
+
+  [MetaEnsemble — stacked GNN + tabular]
+  MetaEnsemble     AUC=0.9888 F1=0.8551 MCC=0.8497
+    → AUC=0.9888  F1=0.8551  MCC=0.8497
+
+────────────────────────────────────────────────────────────
+  SEED 2024
+────────────────────────────────────────────────────────────
+
+  [ElliGAT — 4-layer GATv2 + temporal edges + heterophily]
+    Phase 1: Self-supervised pre-training …
+    Phase 2: Fine-tuning with combined loss …
+    [finetune] ep 020 | loss=4.7071 | AUC=0.8426 | F1=0.2476 | score=0.3827
+    [finetune] ep 040 | loss=10.7342 | AUC=0.8691 | F1=0.4601 | score=0.6017
+    [finetune] ep 060 | loss=3.6086 | AUC=0.9064 | F1=0.6525 | score=0.7587
+    [finetune] ep 080 | loss=14.2875 | AUC=0.9310 | F1=0.6776 | score=0.7844
+    [finetune] ep 100 | loss=9.9076 | AUC=0.9351 | F1=0.6836 | score=0.7898
+    [finetune] ep 120 | loss=14.8564 | AUC=0.9337 | F1=0.6878 | score=0.7921
+    [finetune] ep 140 | loss=10.6672 | AUC=0.9318 | F1=0.6993 | score=0.7990
+    [finetune] ep 160 | loss=12.3508 | AUC=0.9299 | F1=0.6932 | score=0.7943
+    Early stopping at epoch 170
+    → AUC=0.9445  F1=0.7744  MCC=0.7643
+    → AUC=0  F1=0  MCC=0  # EvolveGCN disabled
+
+  [BaselineGNN — GraphSAGE ablation]
+    → AUC=0.9266  F1=0.7779  MCC=0.7733
+
+  [Tabular baselines]
+  MLP             AUC=0.9695 F1=0.8291 MCC=0.8242
+  XGBoost         AUC=0.9920 F1=0.8612 MCC=0.8547
+  LightGBM        AUC=0.9916 F1=0.8744 MCC=0.8689
+  RandomForest    AUC=0.9883 F1=0.8430 MCC=0.8391
+
+  [MetaEnsemble — stacked GNN + tabular]
+  MetaEnsemble     AUC=0.9884 F1=0.8647 MCC=0.8581
+    → AUC=0.9884  F1=0.8647  MCC=0.8581
+
+────────────────────────────────────────────────────────────
+  SEED 17
+────────────────────────────────────────────────────────────
+
+  [ElliGAT — 4-layer GATv2 + temporal edges + heterophily]
+    Phase 1: Self-supervised pre-training …
+    Phase 2: Fine-tuning with combined loss …
+    [finetune] ep 020 | loss=4.0169 | AUC=0.8364 | F1=0.3426 | score=0.4861
+    [finetune] ep 040 | loss=10.0722 | AUC=0.8876 | F1=0.5728 | score=0.6963
+    [finetune] ep 060 | loss=6.7071 | AUC=0.9223 | F1=0.6605 | score=0.7697
+    [finetune] ep 080 | loss=3.4406 | AUC=0.9400 | F1=0.6652 | score=0.7791
+    [finetune] ep 100 | loss=10.7239 | AUC=0.9412 | F1=0.6804 | score=0.7898
+    [finetune] ep 120 | loss=3.9369 | AUC=0.9335 | F1=0.6916 | score=0.7945
+    [finetune] ep 140 | loss=12.5118 | AUC=0.9322 | F1=0.6897 | score=0.7928
+    Early stopping at epoch 149
+    → AUC=0.9391  F1=0.7890  MCC=0.7809
+    → AUC=0  F1=0  MCC=0  # EvolveGCN disabled
+
+  [BaselineGNN — GraphSAGE ablation]
+    → AUC=0.9214  F1=0.7679  MCC=0.7581
+
+  [Tabular baselines]
+  MLP             AUC=0.9655 F1=0.8165 MCC=0.8115
+  XGBoost         AUC=0.9914 F1=0.8594 MCC=0.8511
+  LightGBM        AUC=0.9917 F1=0.8827 MCC=0.8788
+  RandomForest    AUC=0.9902 F1=0.8424 MCC=0.8380
+
+  [MetaEnsemble — stacked GNN + tabular]
+  MetaEnsemble     AUC=0.9883 F1=0.8647 MCC=0.8581
+    → AUC=0.9883  F1=0.8647  MCC=0.8581
+
+────────────────────────────────────────────────────────────
+  SEED 99
+────────────────────────────────────────────────────────────
+
+  [ElliGAT — 4-layer GATv2 + temporal edges + heterophily]
+    Phase 1: Self-supervised pre-training …
+    Phase 2: Fine-tuning with combined loss …
+    [finetune] ep 020 | loss=5.7215 | AUC=0.8245 | F1=0.3353 | score=0.4767
+    [finetune] ep 040 | loss=13.4665 | AUC=0.8811 | F1=0.5628 | score=0.6869
+    [finetune] ep 060 | loss=5.5495 | AUC=0.9088 | F1=0.6559 | score=0.7619
+    [finetune] ep 080 | loss=9.4021 | AUC=0.9240 | F1=0.6652 | score=0.7735
+    [finetune] ep 100 | loss=2.0927 | AUC=0.9223 | F1=0.6728 | score=0.7780
+    [finetune] ep 120 | loss=9.9456 | AUC=0.9134 | F1=0.6831 | score=0.7817
+    [finetune] ep 140 | loss=1.0886 | AUC=0.9132 | F1=0.6868 | score=0.7840
+    [finetune] ep 160 | loss=1.1320 | AUC=0.9106 | F1=0.6892 | score=0.7846
+    [finetune] ep 180 | loss=1.0739 | AUC=0.9026 | F1=0.6821 | score=0.7770
+    Early stopping at epoch 184
+    → AUC=0.9557  F1=0.7983  MCC=0.7911
+    → AUC=0  F1=0  MCC=0  # EvolveGCN disabled
+
+  [BaselineGNN — GraphSAGE ablation]
+    → AUC=0.9276  F1=0.7664  MCC=0.7622
+
+  [Tabular baselines]
+  MLP             AUC=0.9708 F1=0.8219 MCC=0.8226
+  XGBoost         AUC=0.9908 F1=0.8436 MCC=0.8329
+  LightGBM        AUC=0.9917 F1=0.8790 MCC=0.8727
+  RandomForest    AUC=0.9888 F1=0.8462 MCC=0.8436
+
+  [MetaEnsemble — stacked GNN + tabular]
+  MetaEnsemble     AUC=0.9879 F1=0.8645 MCC=0.8598
+    → AUC=0.9879  F1=0.8645  MCC=0.8598
+
+
+============================================================
+AGGREGATED RESULTS (mean ± std, 5 seeds)
+============================================================
+
+  ElliGAT
+    ROC-AUC         : 0.9468 ± 0.0054
+    F1              : 0.7925 ± 0.0104
+    MCC             : 0.7837 ± 0.0108
+    Balanced Acc    : 0.8514 ± 0.0066
+    Precision       : 0.8976 ± 0.0112
+    Recall          : 0.7096 ± 0.0131
+

@@ -1,0 +1,63 @@
+
+name: Download Elliptic Dataset
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Kaggle CLI
+        run: python -m pip install --upgrade kaggle
+
+      - name: Download dataset
+        env:
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p data/elliptic
+          kaggle datasets download \
+            -d ellipticco/elliptic-data-set \
+            -p data/elliptic
+          unzip -o data/elliptic/elliptic-data-set.zip \
+            -d data/elliptic
+          find data/elliptic -type f -name '*.csv' -print
+
+      - name: Verify dataset files
+        run: |
+          set -euo pipefail
+          find data/elliptic -type f \
+            \( -name 'elliptic_txs_classes.csv' \
+            -o -name 'elliptic_txs_features.csv' \
+            -o -name 'elliptic_txs_edgelist.csv' \) \
+            -print
+          for f in \
+            elliptic_txs_classes.csv \
+            elliptic_txs_features.csv \
+            elliptic_txs_edgelist.csv
+          do
+            find data/elliptic -name "$f" -print -quit |
+              grep -q .
+          done
+          echo "All three expected CSV files were found."
+
+      - name: Save dataset as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: elliptic-dataset
+          path: data/elliptic/
+          retention-days: 1
