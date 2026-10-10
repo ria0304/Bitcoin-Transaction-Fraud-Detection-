@@ -40,6 +40,10 @@ on:
         description: "Max fine-tuning epochs in full mode (config default is 300)"
         type: string
         default: "300"
+      hidden_dim:
+        description: "GNN hidden size (config default 256). Lower it (e.g. 128) if runs die from memory."
+        type: string
+        default: "256"
       explain_nodes:
         description: "GNNExplainer nodes in full mode (code default 30; explainer is slow on CPU)"
         type: string
@@ -171,6 +175,36 @@ jobs:
           echo "path=$DIR" >> "$GITHUB_OUTPUT"
           echo "Dataset folder: $DIR"
 
+      - name: Check config honours env overrides
+        env:
+          SEEDS: ${{ matrix.seed }}
+          EPOCHS: "7"
+        run: |
+          python -c "
+          import os
+          from configs.config import SEEDS, EPOCHS
+          want = [int(os.environ['SEEDS'])]
+          assert SEEDS == want, f'configs/config.py ignores the SEEDS env var (got {SEEDS}, want {want}). Commit the updated configs/config.py.'
+          assert EPOCHS == 7, 'configs/config.py ignores the EPOCHS env var. Commit the updated configs/config.py.'
+          print('config env overrides OK')
+          "
+
+      - name: Add swap and start memory monitor
+        env:
+          OUTPUT_DIR: outputs/seed-${{ matrix.seed }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUTPUT_DIR"
+          free -h
+          sudo swapoff -a || true
+          sudo fallocate -l 8G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          free -h
+          nohup bash -c 'while true; do date +%T; free -m | sed -n 2,3p; sleep 30; done' \
+            > "$OUTPUT_DIR/mem.log" 2>&1 &
+
       - name: Run pipeline
         env:
           ENTRYPOINT: ${{ inputs.entrypoint }}
@@ -181,6 +215,7 @@ jobs:
           LOSS_NAME: ${{ inputs.loss_name }}
           EDGE_ENCODING: ${{ inputs.edge_encoding }}
           EPOCHS: ${{ inputs.mode == 'smoke' && '3' || inputs.epochs }}
+          HIDDEN_DIM: ${{ inputs.hidden_dim }}
           PRETRAIN_EPOCHS: ${{ inputs.mode == 'smoke' && '2' || '50' }}
           MC_SAMPLES: ${{ inputs.mode == 'smoke' && '5' || '30' }}
           EXPLAIN_NODES: ${{ inputs.mode == 'smoke' && '2' || inputs.explain_nodes }}
@@ -190,6 +225,21 @@ jobs:
           set -euo pipefail
           mkdir -p "$OUTPUT_DIR"
           python -u "$ENTRYPOINT" 2>&1 | tee "$OUTPUT_DIR/stdout.log"
+
+      - name: Diagnose failure (memory / OOM)
+        if: failure()
+        env:
+          OUTPUT_DIR: outputs/seed-${{ matrix.seed }}
+        run: |
+          {
+            echo "### Failure diagnostics (seed ${{ matrix.seed }})"
+            echo '```text'
+            echo "--- last memory samples ---"
+            tail -n 12 "$OUTPUT_DIR/mem.log" 2>/dev/null || true
+            echo "--- kernel OOM messages ---"
+            sudo dmesg 2>/dev/null | grep -iE "out of memory|killed process|oom" | tail -n 5 || echo "(none found)"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Job summary
         if: always()
