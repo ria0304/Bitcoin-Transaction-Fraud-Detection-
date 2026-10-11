@@ -26,6 +26,10 @@ Novel Contribution Plots (Journal)
 
 import os
 import numpy as np
+
+# NumPy 2.x removed np.trapz (renamed np.trapezoid)
+_trapz = getattr(np, "trapezoid", None) or getattr(np, "trapz")
+
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -83,7 +87,7 @@ def plot_pr(results: dict, ax):
             continue
         r = results[name]
         prec, rec, _ = precision_recall_curve(r["true"], r["probs"])
-        auprc = float(np.trapz(prec[::-1], rec[::-1]))
+        auprc = float(_trapz(prec[::-1], rec[::-1]))
         ax.plot(rec, prec, color=PALETTE[name],
                 label=f"{name} AUPRC={auprc:.3f}", linewidth=1.8)
     ax.legend(fontsize=7, loc="upper right")
