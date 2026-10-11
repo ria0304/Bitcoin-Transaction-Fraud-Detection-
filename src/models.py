@@ -1,3 +1,4 @@
+
 """
 src/models.py
 =============
@@ -18,28 +19,29 @@ Novel contributions (journal version)
 2. Heterophily-aware readout: concat([h_i, h_i - mean(h_j)]) with
    formal justification as a fraud-detection-specific inductive bias.
 3. Self-supervised masked-feature pre-training (GraphMAE-style)
-4. Contrastive (NT-Xent) loss with FAGA views — Fraud-Aware Graph
-   Augmentation that preserves heterophilous fraud-node structure
-   (fixes the original code which used two identical forward passes
-   and provided no genuine contrastive signal).
-5. heterophily_score(): per-node L2 norm of (h_i - mean(h_N)) used
-   as an interpretable fraud signal and for AUGT threshold fitting.
+4. Contrastive (NT-Xent) loss with FAGA views.
+5. heterophily_score(): per-node L2 norm of (h_i - mean(h_N)).
 6. mc_dropout_forward(): returns full (S, N) probability tensor for
    MC Dropout uncertainty estimation and pseudo-label generation.
 """
 
 import os
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 from torch_geometric.nn import GATv2Conv, SAGEConv, GCNConv
 from torch.utils.checkpoint import checkpoint as _ckpt
-
 from torch_geometric.nn import global_mean_pool
 from torch_geometric.utils import degree
 
-# Set GRAD_CHECKPOINT=0 to disable (faster, but needs far more RAM).
-_GRAD_CKPT = os.environ.get("GRAD_CHECKPOINT", "1").strip().lower() not in ("0", "false", "no", "")
+
+# Set GRAD_CHECKPOINT=0 to disable gradient checkpointing.
+_GRAD_CKPT = (
+    os.environ.get("GRAD_CHECKPOINT", "1").strip().lower()
+    not in ("0", "false", "no", "")
+)
 
 
 # ─── Utility: Sinusoidal temporal encoding ───────────────────────────────────
@@ -49,50 +51,14 @@ class TemporalEdgeEncoder(nn.Module):
     Encode the scalar timestep-delta |Δt| carried by each edge into a
     d_out-dimensional vector consumed by GATv2's edge-aware attention.
 
-    Two modes
-    ---------
-    mode="sinusoidal" (default)
-        Transformer-style fixed sin/cos positional encoding (Vaswani et al.,
-        2017) on the scalar delta, followed by a small learned projection:
+    Modes
+    -----
+    sinusoidal:
+        Fixed multi-scale sinusoidal encoding followed by a learned
+        projection.
 
-            PE(Δ, 2i)   = sin(Δ / P^(2i/d))
-            PE(Δ, 2i+1) = cos(Δ / P^(2i/d))
-
-        The fixed basis gives the model a *smooth, multi-scale* view of the
-        delta for free: low-index channels vary rapidly (discriminating
-        Δ=0 from Δ=1, i.e. within-timestep vs adjacent-timestep edges),
-        high-index channels vary slowly (discriminating Δ≈2 from Δ≈40,
-        i.e. short-range vs long-range temporal hops). A 2-layer MLP on a
-        raw scalar has to *learn* that multi-scale structure from the
-        supervised signal alone, and with only one input dimension it has
-        very little to work with.
-
-        Because Elliptic deltas lie in [0, 48] rather than the thousands of
-        token positions the original formulation targets, ``max_period``
-        defaults to 100 instead of 10000 — with P=10000 the upper channels
-        would be near-constant across the entire observed range and would
-        contribute nothing.
-
-        The learned projection after the fixed basis keeps the layer at
-        least as expressive as the legacy MLP: it can in principle recover
-        a comparable mapping, but starts from a far better-conditioned
-        representation.
-
-    mode="mlp" (legacy)
-        The original implementation: ``Linear(1→d) → GELU → Linear(d→d)``
-        applied directly to the raw scalar. Retained because the verified
-        5-seed results in the README were produced with this path — set
-        ``EDGE_ENCODING="mlp"`` to reproduce them exactly.
-
-    Parameters
-    ----------
-    d_out : int
-        Output dimensionality (must be even for ``mode="sinusoidal"``);
-        matches ``EDGE_DIM`` and the ``edge_dim`` argument of GATv2Conv.
-    mode : {"sinusoidal", "mlp"}
-    max_period : float
-        Largest wavelength in the sinusoidal basis. Should be on the order
-        of the maximum expected |Δt| (49 timesteps in Elliptic).
+    mlp:
+        Learned multilayer projection of the scalar temporal delta.
     """
 
     def __init__(
@@ -102,303 +68,313 @@ class TemporalEdgeEncoder(nn.Module):
         max_period: float = 100.0,
     ):
         super().__init__()
-        if mode not in ("sinusoidal", "mlp"):
-            raise ValueError(
-                f"TemporalEdgeEncoder: mode must be 'sinusoidal' or 'mlp', got {mode!r}"
-            )
-        self.mode       = mode
-        self.d_out      = d_out
+        self.d_out = d_out
+        self.mode = mode.lower()
         self.max_period = max_period
 
-        if mode == "mlp":
-            self.proj = nn.Sequential(
+        if self.mode not in ("sinusoidal", "mlp"):
+            raise ValueError(
+                f"Unknown temporal encoding mode: {mode!r}. "
+                "Expected 'sinusoidal' or 'mlp'."
+            )
+
+        if self.mode == "sinusoidal":
+            self.proj = nn.Linear(d_out, d_out)
+            half = d_out // 2
+            if half > 0:
+                exponents = torch.arange(half, dtype=torch.float32)
+                denom = max(half - 1, 1)
+                frequencies = torch.exp(
+                    -math.log(max_period) * exponents / denom
+                )
+            else:
+                frequencies = torch.empty(0, dtype=torch.float32)
+
+            self.register_buffer("frequencies", frequencies)
+
+        else:
+            self.mlp = nn.Sequential(
                 nn.Linear(1, d_out),
-                nn.GELU(),
+                nn.ReLU(),
                 nn.Linear(d_out, d_out),
             )
-            return
 
-        if d_out % 2 != 0:
-            raise ValueError(
-                f"TemporalEdgeEncoder: sinusoidal mode needs an even d_out, got {d_out}"
-            )
+    def forward(self, delta: torch.Tensor) -> torch.Tensor:
+        delta = delta.reshape(-1, 1).float()
 
-        # Fixed (non-learned) inverse frequencies — registered as a buffer so
-        # they move with .to(device) and are saved in the state_dict, but are
-        # never updated by the optimiser.
-        half     = d_out // 2
-        exponent = torch.arange(half, dtype=torch.float) / half
-        inv_freq = 1.0 / (max_period ** exponent)          # (d_out/2,)
-        self.register_buffer("inv_freq", inv_freq, persistent=True)
-
-        # Learned projection on top of the fixed basis.
-        self.proj = nn.Sequential(
-            nn.Linear(d_out, d_out),
-            nn.GELU(),
-            nn.Linear(d_out, d_out),
-        )
-
-    def forward(self, edge_attr: torch.Tensor) -> torch.Tensor:
-        """
-        Parameters
-        ----------
-        edge_attr : (E, 1) float tensor of |Δtimestep| per edge.
-
-        Returns
-        -------
-        (E, d_out) edge embedding.
-        """
         if self.mode == "mlp":
-            return self.proj(edge_attr)
+            return self.mlp(delta)
 
-        delta = edge_attr.view(-1, 1)                       # (E, 1)
-        ang   = delta * self.inv_freq.unsqueeze(0)          # (E, d_out/2)
-        pe    = torch.cat([torch.sin(ang), torch.cos(ang)], dim=-1)   # (E, d_out)
-        return self.proj(pe)
+        if self.frequencies.numel() == 0:
+            enc = delta.new_zeros((delta.size(0), self.d_out))
+        else:
+            angles = delta * self.frequencies.unsqueeze(0)
+            enc = torch.cat([torch.sin(angles), torch.cos(angles)], dim=-1)
+
+            if enc.size(-1) < self.d_out:
+                enc = F.pad(enc, (0, self.d_out - enc.size(-1)))
+            elif enc.size(-1) > self.d_out:
+                enc = enc[:, :self.d_out]
+
+        return self.proj(enc)
 
 
-# ─── Proposed Model: ElliGAT ─────────────────────────────────────────────────
+# ─── ElliGAT: proposed model ─────────────────────────────────────────────────
 
 class ElliGAT(nn.Module):
     """
-    Elliptic Graph Attention Transformer (ElliGAT) — proposed model.
+    Edge-aware, heterophily-aware GATv2 for transaction fraud detection.
 
-    Architecture:
-        • Input projection  : Linear(in_dim → hidden)
-        • 4× GATv2Conv layers with residual + LayerNorm
-          - Edge features (temporal delta) injected into attention
-        • Heterophily-aware readout: [h_i ∥ h_i − μ(h_Ni)]
-        • Classifier MLP with dropout
-        • Pre-training head: feature reconstruction (masked autoencoder)
-        • Contrastive head: NT-Xent projection
+    The network combines node features, temporal edge encodings, and
+    ego-versus-neighbour representations.
     """
 
     def __init__(
         self,
-        in_dim: int,
-        hidden_dim: int = 256,
-        num_layers: int = 4,
-        heads: int = 8,
+        in_channels: int,
+        hidden_channels: int = 256,
+        out_channels: int = 1,
+        heads: int = 4,
         dropout: float = 0.3,
-        edge_dim: int = 16,
+        edge_dim: int = 32,
         edge_encoding: str = "sinusoidal",
-        edge_max_period: float = 100.0,
+        **kwargs,
     ):
         super().__init__()
-        self.dropout    = dropout
-        self.num_layers = num_layers
-        self.heads      = heads
-        self.hidden_dim = hidden_dim
 
-        # Temporal edge encoder
-        # edge_encoding="sinusoidal" (default) — fixed sin/cos basis on |Δt|
-        # edge_encoding="mlp"                  — legacy path, reproduces the
-        #                                        verified 5-seed README results
-        self.edge_enc = TemporalEdgeEncoder(
-            edge_dim, mode=edge_encoding, max_period=edge_max_period
+        # Accept the common hidden_dim alias used by experiment configs.
+        if "hidden_dim" in kwargs:
+            hidden_channels = int(kwargs.pop("hidden_dim"))
+
+        if kwargs:
+            unexpected = ", ".join(sorted(kwargs))
+            raise TypeError(f"Unexpected ElliGAT arguments: {unexpected}")
+
+        self.in_channels = in_channels
+        self.hidden_channels = hidden_channels
+        self.out_channels = out_channels
+        self.dropout = dropout
+        self.heads = heads
+        self.edge_dim = edge_dim
+        self.edge_encoding = edge_encoding
+
+        self.temporal_encoder = TemporalEdgeEncoder(
+            d_out=edge_dim,
+            mode=edge_encoding,
         )
 
-        # Input projection
-        self.input_proj = nn.Sequential(
-            nn.Linear(in_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.GELU(),
-        )
+        self.input_proj = nn.Linear(in_channels, hidden_channels)
 
-        # GATv2 layers (support edge_dim)
-        self.convs = nn.ModuleList()
-        self.norms = nn.ModuleList()
-        self.skips = nn.ModuleList()
-
-        for _ in range(num_layers):
-            self.convs.append(
-                GATv2Conv(
-                    hidden_dim,
-                    hidden_dim // heads,
-                    heads=heads,
-                    dropout=dropout,
-                    edge_dim=edge_dim,
-                    concat=True,
-                    add_self_loops=True,
-                )
+        self.convs = nn.ModuleList([
+            GATv2Conv(
+                hidden_channels,
+                hidden_channels // heads,
+                heads=heads,
+                concat=True,
+                dropout=dropout,
+                edge_dim=edge_dim,
+                add_self_loops=False,
             )
-            self.norms.append(nn.LayerNorm(hidden_dim))
-            self.skips.append(nn.Linear(hidden_dim, hidden_dim, bias=False))
+            for _ in range(4)
+        ])
 
-        # Heterophily aggregation: concat [h, h - mean_nbr]
+        self.norms = nn.ModuleList([
+            nn.LayerNorm(hidden_channels) for _ in range(4)
+        ])
+
+        self.output_proj = nn.Linear(hidden_channels * 2, hidden_channels)
+
         self.classifier = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim),
-            nn.GELU(),
+            nn.Linear(hidden_channels, hidden_channels // 2),
+            nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim // 2, 1),
+            nn.Linear(hidden_channels // 2, out_channels),
         )
 
-        # Pre-training head: reconstruct masked features
+        # Self-supervised masked-feature reconstruction head.
         self.pretrain_head = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, in_dim),
+            nn.Linear(hidden_channels, hidden_channels),
+            nn.ReLU(),
+            nn.Linear(hidden_channels, in_channels),
         )
 
-        # Contrastive projection head (NT-Xent)
+        # Contrastive projection head.
         self.contrast_head = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, 128),
+            nn.Linear(hidden_channels, hidden_channels),
+            nn.ReLU(),
+            nn.Linear(hidden_channels, 128),
         )
 
-    def encode(
-        self,
-        x: torch.Tensor,
-        edge_index: torch.Tensor,
-        edge_attr: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Encode node features → latent representation h."""
+    def _edge_attr(self, edge_attr, num_edges, device):
+        """Convert raw scalar temporal edge deltas to encoded vectors."""
+        if edge_attr is None:
+            delta = torch.zeros(num_edges, device=device)
+        else:
+            delta = edge_attr
+            if delta.dim() > 1:
+                delta = delta[:, 0]
+        return self.temporal_encoder(delta)
+
+    def encode(self, x, edge_index, edge_attr=None):
+        """
+        Encode all nodes in the supplied graph.
+
+        Returns an embedding for every node. Gradient checkpointing can
+        reduce activation memory during training.
+        """
         h = self.input_proj(x)
-
-        e = None
-        if edge_attr is not None:
-            e = self.edge_enc(edge_attr)   # (E, edge_dim)
-
-        # Gradient checkpointing: each GATv2 layer materialises several
-        # (E x hidden) tensors (~0.7 GB each on Elliptic). Fine-tuning runs
-        # 4 full-graph forwards per epoch (main + 2 FAGA views + pretrain),
-        # which OOMs CPU runners. Checkpointing keeps only layer inputs and
-        # recomputes the rest in backward (same maths, RNG state preserved).
-        use_ckpt = (
-            _GRAD_CKPT and self.training and torch.is_grad_enabled()
+        edge_emb = self._edge_attr(
+            edge_attr,
+            edge_index.size(1),
+            x.device,
         )
-        for conv, norm, skip in zip(self.convs, self.norms, self.skips):
-            if use_ckpt:
+
+        for conv, norm in zip(self.convs, self.norms):
+            residual = h
+
+            if self.training and _GRAD_CKPT and h.requires_grad:
                 h = _ckpt(
-                    self._layer_fn, conv, norm, skip, h, edge_index, e,
+                    lambda node_x, edge_emb_arg, conv_layer=conv:
+                        conv_layer(
+                            node_x,
+                            edge_index,
+                            edge_attr=edge_emb_arg,
+                        ),
+                    h,
+                    edge_emb,
                     use_reentrant=False,
                 )
             else:
-                h = self._layer_fn(conv, norm, skip, h, edge_index, e)
-        return h
+                h = conv(h, edge_index, edge_attr=edge_emb)
 
-    def _layer_fn(self, conv, norm, skip, h, edge_index, e):
-        h2 = F.gelu(conv(h, edge_index, edge_attr=e))
-        h  = norm(h2 + skip(h))
-        return F.dropout(h, p=self.dropout, training=self.training)
+            h = norm(h)
+            h = F.elu(h)
+            h = F.dropout(h, p=self.dropout, training=self.training)
 
-    def _heterophily_readout(
-        self,
-        h: torch.Tensor,
-        edge_index: torch.Tensor,
-    ) -> torch.Tensor:
+            if h.shape == residual.shape:
+                h = h + residual
+
+        # Heterophily-aware neighbour difference representation.
+        src, dst = edge_index
+        neighbour_sum = torch.zeros_like(h)
+        neighbour_count = torch.zeros(
+            h.size(0), device=h.device, dtype=h.dtype
+        )
+
+        neighbour_sum.index_add_(0, dst, h[src])
+        neighbour_count.index_add_(
+            0,
+            dst,
+            torch.ones(dst.numel(), device=h.device, dtype=h.dtype),
+        )
+
+        neighbour_mean = neighbour_sum / neighbour_count.clamp_min(1).unsqueeze(-1)
+        difference = h - neighbour_mean
+
+        combined = torch.cat([h, difference], dim=-1)
+        return F.elu(self.output_proj(combined))
+
+    def forward(self, data):
+        """Return raw logits for every node."""
+        h = self.encode(data.x, data.edge_index, getattr(data, "edge_attr", None))
+        logits = self.classifier(h)
+        return logits.squeeze(-1) if logits.size(-1) == 1 else logits
+
+    def pretrain_loss(self, data, mask_ratio: float = 0.3):
         """
-        Compute per-node [h_i ∥ h_i - mean(h_Nj)].
-        This gives the model an explicit signal when a node's embedding
-        differs from its neighbours' — a hallmark of fraud in Elliptic
-        (illicit txs sit among licit ones = heterophily).
+        Mask a subset of node features and reconstruct them from embeddings.
         """
-        row, col   = edge_index          # row=src, col=dst
-        deg        = degree(row, num_nodes=h.size(0), dtype=torch.float)
-        deg        = deg.clamp(min=1).unsqueeze(1)
+        x_orig = data.x
+        n_nodes = x_orig.size(0)
 
-        nbr_sum    = torch.zeros_like(h)
-        nbr_sum.scatter_add_(0, col.unsqueeze(1).expand(-1, h.size(1)), h[row])
-        nbr_mean   = nbr_sum / deg
+        mask_count = max(1, int(n_nodes * mask_ratio))
+        mask_idx = torch.randperm(
+            n_nodes, device=x_orig.device
+        )[:mask_count]
 
-        return torch.cat([h, h - nbr_mean], dim=-1)   # (N, 2*hidden)
-
-    def forward(self, data) -> torch.Tensor:
-        h  = self.encode(data.x, data.edge_index, data.edge_attr)
-        hr = self._heterophily_readout(h, data.edge_index)
-        return self.classifier(hr).squeeze(-1)
-
-    # ── Pre-training (masked feature autoencoder) ──────────────────────────
-    def pretrain_forward(
-        self,
-        data,
-        mask_ratio: float = 0.20,
-    ) -> torch.Tensor:
-        """
-        Randomly mask mask_ratio of node features, encode, then reconstruct.
-        Returns MSE reconstruction loss on masked nodes only.
-        """
-        x_orig = data.x.clone()
-        N, D   = x_orig.shape
-
-        mask_idx = torch.rand(N, device=x_orig.device) < mask_ratio
         x_masked = x_orig.clone()
-        x_masked[mask_idx] = 0.0   # zero-out masked features
+        x_masked[mask_idx] = 0.0
 
-        # Temporarily replace data.x
-        data_tmp     = data.clone()
-        data_tmp.x   = x_masked
-        h            = self.encode(data_tmp.x, data.edge_index, data.edge_attr)
-        x_recon      = self.pretrain_head(h)
+        data_tmp = data.clone()
+        data_tmp.x = x_masked
 
-        loss_recon = F.mse_loss(x_recon[mask_idx], x_orig[mask_idx])
-        return loss_recon
+        h = self.encode(
+            data_tmp.x,
+            data_tmp.edge_index,
+            getattr(data_tmp, "edge_attr", None),
+        )
+        x_recon = self.pretrain_head(h)
 
-    # ── Contrastive auxiliary loss (NT-Xent) with FAGA views ──────────────
+        return F.mse_loss(x_recon[mask_idx], x_orig[mask_idx])
+
     def contrastive_loss(
         self,
         data,
         temperature: float = 0.07,
     ) -> torch.Tensor:
         """
-        Contrastive NT-Xent loss using Fraud-Aware Graph Augmentation (FAGA).
+        Memory-bounded symmetric cross-view contrastive loss using FAGA.
 
-        **Fix over original code**: the original implementation passed the
-        same graph through two identical encode() calls. Because the graph
-        structure was unchanged, the two "views" differed only through
-        dropout stochasticity — an extremely weak contrastive signal that
-        collapses representations rather than separating them.
+        Only a sampled subset of training nodes participates in the
+        contrastive similarity matrix. The graph encoder still processes
+        the full graph.
 
-        FAGA generates two structurally different views:
-          view1 — licit-edge-drop augmentation (structural augmentation)
-          view2 — fraud-preserving feature mask  (attribute augmentation)
-
-        Positive pairs = same node index across the two views.
-        NT-Xent is applied to labelled training nodes only for memory efficiency.
+        Set CONTRASTIVE_MAX_NODES to adjust the subset size. The default
+        is 2048 nodes, producing a 2048 x 2048 similarity matrix rather
+        than the much larger 2B x 2B matrix over every training node.
         """
         from src.augmentation import augment_pair
 
         self.train()
-        mask = data.train_mask
 
-        # Generate two structurally different augmented views via FAGA
+        train_idx = data.train_mask.nonzero(as_tuple=False).view(-1)
+
+        if train_idx.numel() < 2:
+            return next(self.parameters()).new_zeros(())
+
+        max_nodes = max(
+            2,
+            int(os.environ.get("CONTRASTIVE_MAX_NODES", "2048")),
+        )
+
+        if train_idx.numel() > max_nodes:
+            chosen = torch.randperm(
+                train_idx.numel(),
+                device=train_idx.device,
+            )[:max_nodes]
+            train_idx = train_idx[chosen]
+
         view1, view2 = augment_pair(data)
 
-        z1 = F.normalize(
-            self.contrast_head(
-                self.encode(view1.x, view1.edge_index, view1.edge_attr)[mask]
-            ), dim=-1
+        h1 = self.encode(
+            view1.x,
+            view1.edge_index,
+            getattr(view1, "edge_attr", None),
         )
-        z2 = F.normalize(
-            self.contrast_head(
-                self.encode(view2.x, view2.edge_index, view2.edge_attr)[mask]
-            ), dim=-1
+        h2 = self.encode(
+            view2.x,
+            view2.edge_index,
+            getattr(view2, "edge_attr", None),
         )
 
-        B   = z1.size(0)
-        z   = torch.cat([z1, z2], dim=0)         # (2B, 128)
-        sim = torch.mm(z, z.T) / temperature      # (2B, 2B)
+        z1 = F.normalize(self.contrast_head(h1[train_idx]), dim=-1)
+        z2 = F.normalize(self.contrast_head(h2[train_idx]), dim=-1)
 
-        # Positives: (i, i+B) pairs — same node, different FAGA views
-        labels = torch.arange(B, device=z.device)
-        loss   = (
-            F.cross_entropy(sim[:B, B:], labels) +
-            F.cross_entropy(sim[B:, :B], labels)
-        ) / 2
-        return loss
+        # Compute only cross-view similarities.
+        logits = torch.mm(z1, z2.T) / temperature
+        labels = torch.arange(z1.size(0), device=z1.device)
+
+        loss_forward = F.cross_entropy(logits, labels)
+        loss_backward = F.cross_entropy(logits.T, labels)
+
+        return (loss_forward + loss_backward) / 2
 
     def mc_dropout_forward(self, data, n: int) -> torch.Tensor:
         """
-        n stochastic forward passes for MC Dropout uncertainty estimation.
+        Perform n stochastic forward passes for MC Dropout uncertainty.
 
-        Returns
-        -------
-        (n, N) tensor of raw logits — sigmoid to get probabilities.
-        Used by src/uncertainty.py and src/pseudo_label.py.
+        Returns a tensor of shape (n, N) for binary classification, or
+        (n, N, C) for multi-class classification.
         """
         self.train()
         with torch.no_grad():
@@ -406,131 +382,121 @@ class ElliGAT(nn.Module):
 
     def heterophily_score(self, data) -> torch.Tensor:
         """
-        Novel interpretable fraud signal: per-node L2 norm of (h_i - mean(h_N)).
-
-        A high score means a node's embedding is very different from its
-        neighbourhood mean — the defining property of illicit transaction
-        nodes in the Elliptic dataset (fraud nodes are surrounded by licit
-        neighbours due to mixing/layering). This score can be used as:
-
-          • A standalone anomaly signal (threshold-based flagging)
-          • An input feature to the AUGT threshold fitter
-          • A qualitative visualisation axis in explainability plots
-
-        Returns
-        -------
-        (N,) float tensor of heterophily scores (non-negative).
+        Compute the L2 distance between each node embedding and its
+        neighbourhood's mean embedding.
         """
-        self.eval()
-        with torch.no_grad():
-            h  = self.encode(data.x, data.edge_index, data.edge_attr)
-            hr = self._heterophily_readout(h, data.edge_index)
-            # hr has shape (N, 2*hidden): first half = h_i, second = h_i - mean(h_N)
-            diff = hr[:, self.hidden_dim:]        # (N, hidden) — the difference term
-            return diff.norm(dim=-1)              # (N,) L2 norm
-
-
-# ─── EvolveGCN-O (Temporal GNN baseline) ─────────────────────────────────────
-
-class EvolveGCN(nn.Module):
-    """
-    Simplified EvolveGCN-O: GCN weights evolved by a GRU over timesteps.
-    This is the temporal-graph SOTA baseline on Elliptic.
-
-    For inference we treat all 49 timesteps as sequential mini-batches and
-    evolve the weight matrix with a GRU cell.
-    """
-
-    def __init__(self, in_dim: int, hidden_dim: int, dropout: float = 0.3):
-        super().__init__()
-        self.hidden_dim = hidden_dim
-        self.dropout    = dropout
-
-        # GRU cell that evolves the GCN weight matrix
-        self.weight_gru = nn.GRUCell(
-            input_size=hidden_dim * in_dim,
-            hidden_size=hidden_dim * in_dim,
+        h = self.encode(
+            data.x,
+            data.edge_index,
+            getattr(data, "edge_attr", None),
         )
-        self.W = nn.Parameter(torch.empty(in_dim, hidden_dim))
-        nn.init.xavier_uniform_(self.W)
 
-        self.conv2 = GCNConv(hidden_dim, hidden_dim)
-        self.norm1  = nn.LayerNorm(hidden_dim)
-        self.norm2  = nn.LayerNorm(hidden_dim)
-
-        self.classifier = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim // 2, 1),
+        src, dst = data.edge_index
+        neighbour_sum = torch.zeros_like(h)
+        neighbour_count = torch.zeros(
+            h.size(0), device=h.device, dtype=h.dtype
         )
-        self._W_h = None   # GRU hidden state (evolved weight)
 
-    def reset_state(self):
-        self._W_h = None
+        neighbour_sum.index_add_(0, dst, h[src])
+        neighbour_count.index_add_(
+            0,
+            dst,
+            torch.ones(dst.numel(), device=h.device, dtype=h.dtype),
+        )
 
-    def _gcn_layer(
-        self,
-        x: torch.Tensor,
-        edge_index: torch.Tensor,
-        W: torch.Tensor,
-    ) -> torch.Tensor:
-        """Manual GCN multiplication with evolved W."""
-        return F.gelu(x @ W)
-
-    def forward_timestep(
-        self,
-        x: torch.Tensor,
-        edge_index: torch.Tensor,
-    ) -> torch.Tensor:
-        in_dim, hid = self.W.shape
-        W_flat = self.W.view(1, -1)
-
-        if self._W_h is None:
-            self._W_h = W_flat.detach().clone()
-
-        # Evolve the weight matrix
-        new_W_flat = self.weight_gru(W_flat, self._W_h)
-        self._W_h  = new_W_flat.detach()
-        W_evolved  = new_W_flat.view(in_dim, hid)
-
-        h  = self._gcn_layer(x, edge_index, W_evolved)
-        h  = self.norm1(h)
-        h  = F.dropout(h, p=self.dropout, training=self.training)
-        h2 = F.gelu(self.conv2(h, edge_index))
-        h  = self.norm2(h + h2)
-        return self.classifier(h).squeeze(-1)
-
-    def forward(self, data):
-        """Process all timesteps sequentially (full-graph mode)."""
-        self.reset_state()
-        return self.forward_timestep(data.x, data.edge_index)
+        neighbour_mean = (
+            neighbour_sum / neighbour_count.clamp_min(1).unsqueeze(-1)
+        )
+        return torch.norm(h - neighbour_mean, p=2, dim=-1)
 
 
-# ─── Baseline: GraphSAGE (ablation — no attention, no edge features) ─────────
+# ─── Baseline models ─────────────────────────────────────────────────────────
 
 class BaselineGNN(nn.Module):
-    """2-layer GraphSAGE — ablation, same as original repo."""
+    """GraphSAGE baseline."""
 
-    def __init__(self, in_dim: int, hidden_dim: int = 128, dropout: float = 0.3):
+    def __init__(
+        self,
+        in_channels: int,
+        hidden_channels: int = 128,
+        out_channels: int = 1,
+        dropout: float = 0.3,
+        **kwargs,
+    ):
         super().__init__()
+
+        if "hidden_dim" in kwargs:
+            hidden_channels = int(kwargs.pop("hidden_dim"))
+
+        self.conv1 = SAGEConv(in_channels, hidden_channels)
+        self.conv2 = SAGEConv(hidden_channels, hidden_channels)
         self.dropout = dropout
-        self.proj    = nn.Linear(in_dim, hidden_dim)
-        self.conv1   = SAGEConv(hidden_dim, hidden_dim)
-        self.conv2   = SAGEConv(hidden_dim, hidden_dim)
-        self.norm1   = nn.LayerNorm(hidden_dim)
-        self.norm2   = nn.LayerNorm(hidden_dim)
-        self.head    = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2),
+        self.classifier = nn.Linear(hidden_channels, out_channels)
+
+    def forward(self, data):
+        h = F.relu(self.conv1(data.x, data.edge_index))
+        h = F.dropout(h, p=self.dropout, training=self.training)
+        h = F.relu(self.conv2(h, data.edge_index))
+        logits = self.classifier(h)
+        return logits.squeeze(-1) if logits.size(-1) == 1 else logits
+
+
+class EvolveGCN_O(nn.Module):
+    """Lightweight GCN baseline."""
+
+    def __init__(
+        self,
+        in_channels: int,
+        hidden_channels: int = 128,
+        out_channels: int = 1,
+        dropout: float = 0.3,
+        **kwargs,
+    ):
+        super().__init__()
+
+        if "hidden_dim" in kwargs:
+            hidden_channels = int(kwargs.pop("hidden_dim"))
+
+        self.conv1 = GCNConv(in_channels, hidden_channels)
+        self.conv2 = GCNConv(hidden_channels, hidden_channels)
+        self.dropout = dropout
+        self.classifier = nn.Linear(hidden_channels, out_channels)
+
+    def forward(self, data):
+        h = F.relu(self.conv1(data.x, data.edge_index))
+        h = F.dropout(h, p=self.dropout, training=self.training)
+        h = F.relu(self.conv2(h, data.edge_index))
+        logits = self.classifier(h)
+        return logits.squeeze(-1) if logits.size(-1) == 1 else logits
+
+
+class MLP(nn.Module):
+    """Tabular-only multilayer perceptron baseline."""
+
+    def __init__(
+        self,
+        in_channels: int,
+        hidden_channels: int = 128,
+        out_channels: int = 1,
+        dropout: float = 0.3,
+        **kwargs,
+    ):
+        super().__init__()
+
+        if "hidden_dim" in kwargs:
+            hidden_channels = int(kwargs.pop("hidden_dim"))
+
+        self.net = nn.Sequential(
+            nn.Linear(in_channels, hidden_channels),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim // 2, 1),
+            nn.Linear(hidden_channels, hidden_channels // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_channels // 2, out_channels),
         )
 
     def forward(self, data):
-        x  = F.gelu(self.proj(data.x))
-        ei = data.edge_index
-        h  = self.norm1(F.gelu(self.conv1(x, ei)) + x)
-        h  = F.dropout(h, p=self.dropout, training=self.training)
-        h  = self.norm2(F.gelu(self.conv2(h, ei)) + h)
-        return self.head(h).squeeze(-1)
+        x = data.x if hasattr(data, "x") else data
+        logits = self.net(x)
+        return logits.squeeze(-1) if logits.size(-1) == 1 else logits
