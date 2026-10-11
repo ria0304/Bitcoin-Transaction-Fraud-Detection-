@@ -339,11 +339,13 @@ jobs:
 
   # ─────────────────────────────────────────────────────────────────────────
   aggregate:
-    name: Merge methods + aggregate seeds
+    name: Merge methods + aggregate seeds + save to result/
     needs: [elligat, gnn, tabmeta]
     if: ${{ always() && !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: write          # needed to commit the result/ folder
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -366,3 +368,41 @@ jobs:
           name: results-aggregate
           path: aggregate/
           retention-days: 90
+
+      - name: Save results into result/ and commit
+        env:
+          RUN_DIR: result/run-${{ github.run_number }}-${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUN_DIR/methods"
+          cp -r aggregate "$RUN_DIR/aggregate"
+          cp -r merged "$RUN_DIR/per_seed_merged"
+          # per-method logs, metrics, plots (skip model weights + noisy monitor files)
+          rsync -a --exclude='*.pt' --exclude='mem.log' --exclude='pip_freeze.txt' \
+            all-methods/ "$RUN_DIR/methods/"
+          # always-current copy of the newest aggregate
+          rm -rf result/latest && mkdir -p result/latest
+          cp -r aggregate/. result/latest/
+          cat > "$RUN_DIR/RUN_INFO.txt" <<INFO
+          run_number : ${{ github.run_number }}
+          mode       : ${{ inputs.mode }}
+          methods    : ${{ inputs.methods }}
+          seeds      : ${{ inputs.seeds }}
+          loss       : ${{ inputs.loss_name }}
+          edge_enc   : ${{ inputs.edge_encoding }}
+          epochs     : ${{ inputs.epochs }}
+          hidden_dim : ${{ inputs.hidden_dim }}
+          commit     : ${{ github.sha }}
+          INFO
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add result
+          if git diff --cached --quiet; then
+            echo "Nothing new to commit."; exit 0
+          fi
+          git commit -m "result: stepwise run ${{ github.run_number }} (${{ inputs.mode }})"
+          for i in 1 2 3; do
+            git pull --rebase origin "${{ github.ref_name }}" && git push origin "HEAD:${{ github.ref_name }}" && exit 0
+            sleep 5
+          done
+          echo "::error::Could not push result/ after 3 attempts"; exit 1
