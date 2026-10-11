@@ -1,4 +1,3 @@
-
 """
 src/models.py
 =============
@@ -468,6 +467,10 @@ class EvolveGCN_O(nn.Module):
         h = F.relu(self.conv2(h, data.edge_index))
         logits = self.classifier(h)
         return logits.squeeze(-1) if logits.size(-1) == 1 else logits
+
+
+# main.py / run_clean_reproduction.py import this class as `EvolveGCN`.
+EvolveGCN = EvolveGCN_O
 
 
 class MLP(nn.Module):
