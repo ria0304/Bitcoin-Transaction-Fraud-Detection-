@@ -42,6 +42,10 @@ References
 from __future__ import annotations
 
 import numpy as np
+
+# NumPy 2.x removed np.trapz (renamed np.trapezoid)
+_trapz = getattr(np, "trapezoid", None) or getattr(np, "trapz")
+
 from sklearn.metrics import (
     f1_score, precision_score, recall_score,
     roc_auc_score, matthews_corrcoef,
@@ -212,7 +216,7 @@ def compute_aurc(
 
     coverages = np.array(coverages)
     risks     = np.array(risks)
-    aurc      = float(np.trapz(risks, coverages)) if len(coverages) > 1 else 1.0
+    aurc      = float(_trapz(risks, coverages)) if len(coverages) > 1 else 1.0
     return aurc, coverages, risks
 
 
