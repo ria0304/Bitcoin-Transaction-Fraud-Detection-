@@ -251,6 +251,7 @@ jobs:
           MC_SAMPLES: ${{ inputs.mode == 'smoke' && '5' || '30' }}
           EXPLAIN_NODES: ${{ inputs.mode == 'smoke' && '2' || inputs.explain_nodes }}
           EXPLAIN_EPOCHS: ${{ inputs.mode == 'smoke' && '5' || inputs.explain_epochs }}
+          CONTRASTIVE_MAX_NODES: "2048"
           PYTHONUNBUFFERED: "1"
         run: |
           set -euo pipefail
