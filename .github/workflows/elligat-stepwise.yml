@@ -1,0 +1,368 @@
+name: ElliGAT Stepwise (one method per job)
+
+# Same pipeline as "ElliGAT Full Pipeline", but every method runs in its OWN
+# job/runner, so one heavy method cannot OOM-kill (exit 143) the others.
+#
+#   setup    -> dataset cache + seed matrix
+#   elligat  -> ElliGAT + MC dropout + PLP + GNNExplainer (the heavy job), per seed
+#   gnn      -> EvolveGCN / BaselineGNN / ROLAND / TGN, one job each, per seed
+#   tabmeta  -> tabular baselines + MetaEnsemble (needs elligat's probabilities)
+#   aggregate-> merge methods -> per-seed metrics -> mean ± std table
+#
+# Use "methods" to run only some (e.g. just elligat) while debugging.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "smoke = 1 seed, tiny epochs. full = real run."
+        type: choice
+        options: [smoke, full]
+        default: smoke
+      methods:
+        description: "Which jobs to run"
+        type: choice
+        options: [all, elligat-only, baselines-only, tabmeta-only]
+        default: all
+      seeds:
+        description: "Comma-separated seeds for full mode"
+        type: string
+        default: "42,123,2024,17,99"
+      loss_name:
+        type: choice
+        options: [asymmetric, focal]
+        default: asymmetric
+      edge_encoding:
+        type: choice
+        options: [sinusoidal, mlp]
+        default: sinusoidal
+      epochs:
+        description: "Max fine-tuning epochs in full mode"
+        type: string
+        default: "300"
+      hidden_dim:
+        description: "ElliGAT/EvolveGCN hidden size. Use 128 (or 64) if it still gets killed."
+        type: string
+        default: "128"
+      explain_nodes:
+        type: string
+        default: "10"
+      explain_epochs:
+        type: string
+        default: "50"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: elligat-stepwise-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.11"
+  TORCH_VERSION: "2.6.0"
+  DATA_CACHE_KEY: elliptic-dataset-v1
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────
+  setup:
+    name: Dataset + seed matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      seeds: ${{ steps.matrix.outputs.seeds }}
+    steps:
+      - name: Build seed matrix
+        id: matrix
+        env:
+          MODE: ${{ inputs.mode }}
+          SEEDS_INPUT: ${{ inputs.seeds }}
+        run: |
+          set -euo pipefail
+          if [ "$MODE" = "smoke" ]; then SEEDS="42"; else SEEDS="$(echo "$SEEDS_INPUT" | tr -d ' ')"; fi
+          if ! echo "$SEEDS" | grep -Eq '^[0-9]+(,[0-9]+)*$'; then
+            echo "::error::seeds must be comma-separated integers, got: $SEEDS"; exit 1
+          fi
+          JSON="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1].split(",")))' "$SEEDS")"
+          echo "seeds=$JSON" >> "$GITHUB_OUTPUT"
+
+      - name: Restore dataset cache
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: data/elliptic
+          key: ${{ env.DATA_CACHE_KEY }}
+
+      - name: Set up Python
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Download Elliptic dataset from Kaggle
+        if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade kaggle
+          mkdir -p data/elliptic
+          kaggle datasets download -d ellipticco/elliptic-data-set -p data/elliptic
+          unzip -o data/elliptic/elliptic-data-set.zip -d data/elliptic
+          rm -f data/elliptic/elliptic-data-set.zip
+
+      - name: Verify dataset files
+        run: |
+          set -euo pipefail
+          for f in elliptic_txs_classes.csv elliptic_txs_features.csv elliptic_txs_edgelist.csv; do
+            find data/elliptic -name "$f" -print -quit | grep -q . \
+              || { echo "::error::$f not found in data/elliptic"; exit 1; }
+          done
+
+  # ─────────────────────────────────────────────────────────────────────────
+  elligat:
+    name: ElliGAT + PLP + explainer (seed ${{ matrix.seed }})
+    needs: setup
+    if: ${{ inputs.methods == 'all' || inputs.methods == 'elligat-only' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        seed: ${{ fromJSON(needs.setup.outputs.seeds) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install dependencies (CPU torch, pinned)
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          echo "torch==${TORCH_VERSION}" > constraints.txt
+          python -m pip install "torch==${TORCH_VERSION}" --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -c constraints.txt -r requirements.txt
+      - uses: actions/cache/restore@v4
+        with:
+          path: data/elliptic
+          key: ${{ env.DATA_CACHE_KEY }}
+          fail-on-cache-miss: true
+      - name: Locate dataset folder
+        id: data
+        run: |
+          set -euo pipefail
+          FEATS="$(find data/elliptic -name elliptic_txs_features.csv -print -quit)"
+          echo "path=$(cd "$(dirname "$FEATS")" && pwd)" >> "$GITHUB_OUTPUT"
+      - name: Swap + memory monitor
+        env:
+          OUTPUT_DIR: outputs/method-${{ matrix.seed }}-ElliGAT
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUTPUT_DIR"
+          sudo swapoff -a || true
+          sudo fallocate -l 8G /mnt/swapfile && sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile && sudo swapon /mnt/swapfile
+          nohup bash -c 'while true; do date +%T; free -m | sed -n 2,3p; sleep 30; done' > "$OUTPUT_DIR/mem.log" 2>&1 &
+      - name: Run ElliGAT
+        env:
+          METHODS: ElliGAT
+          BITCOIN_DATA_PATH: ${{ steps.data.outputs.path }}
+          ELLIPTIC_CACHE_PATH: ${{ steps.data.outputs.path }}
+          OUTPUT_DIR: outputs/method-${{ matrix.seed }}-ElliGAT
+          SEEDS: ${{ matrix.seed }}
+          LOSS_NAME: ${{ inputs.loss_name }}
+          EDGE_ENCODING: ${{ inputs.edge_encoding }}
+          EPOCHS: ${{ inputs.mode == 'smoke' && '3' || inputs.epochs }}
+          HIDDEN_DIM: ${{ inputs.mode == 'smoke' && '64' || inputs.hidden_dim }}
+          PRETRAIN_EPOCHS: ${{ inputs.mode == 'smoke' && '2' || '50' }}
+          PLP_EPOCHS: ${{ inputs.mode == 'smoke' && '3' || '50' }}
+          MC_SAMPLES: ${{ inputs.mode == 'smoke' && '5' || '30' }}
+          EXPLAIN_NODES: ${{ inputs.mode == 'smoke' && '2' || inputs.explain_nodes }}
+          EXPLAIN_EPOCHS: ${{ inputs.mode == 'smoke' && '5' || inputs.explain_epochs }}
+          CONTRASTIVE_MAX_NODES: "2048"
+          PYTHONUNBUFFERED: "1"
+        run: |
+          set -euo pipefail
+          python -u main.py 2>&1 | tee "$OUTPUT_DIR/stdout.log"
+      - name: Failure diagnostics
+        if: failure()
+        run: |
+          {
+            echo "### Failure diagnostics (ElliGAT seed ${{ matrix.seed }})"
+            echo '```text'
+            tail -n 12 outputs/method-${{ matrix.seed }}-ElliGAT/mem.log 2>/dev/null || true
+            sudo dmesg 2>/dev/null | grep -iE "out of memory|killed process|oom" | tail -n 5 || echo "(no OOM lines)"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: method-${{ matrix.seed }}-ElliGAT
+          path: outputs/method-${{ matrix.seed }}-ElliGAT/
+          if-no-files-found: warn
+          retention-days: 30
+
+  # ─────────────────────────────────────────────────────────────────────────
+  gnn:
+    name: ${{ matrix.method }} (seed ${{ matrix.seed }})
+    needs: setup
+    if: ${{ inputs.methods == 'all' || inputs.methods == 'baselines-only' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        seed: ${{ fromJSON(needs.setup.outputs.seeds) }}
+        method: [EvolveGCN, BaselineGNN, ROLAND, TGN]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install dependencies (CPU torch, pinned)
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          echo "torch==${TORCH_VERSION}" > constraints.txt
+          python -m pip install "torch==${TORCH_VERSION}" --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -c constraints.txt -r requirements.txt
+      - uses: actions/cache/restore@v4
+        with:
+          path: data/elliptic
+          key: ${{ env.DATA_CACHE_KEY }}
+          fail-on-cache-miss: true
+      - name: Locate dataset folder
+        id: data
+        run: |
+          set -euo pipefail
+          FEATS="$(find data/elliptic -name elliptic_txs_features.csv -print -quit)"
+          echo "path=$(cd "$(dirname "$FEATS")" && pwd)" >> "$GITHUB_OUTPUT"
+      - name: Run ${{ matrix.method }}
+        env:
+          METHODS: ${{ matrix.method }}
+          BITCOIN_DATA_PATH: ${{ steps.data.outputs.path }}
+          ELLIPTIC_CACHE_PATH: ${{ steps.data.outputs.path }}
+          OUTPUT_DIR: outputs/method-${{ matrix.seed }}-${{ matrix.method }}
+          SEEDS: ${{ matrix.seed }}
+          LOSS_NAME: ${{ inputs.loss_name }}
+          EDGE_ENCODING: ${{ inputs.edge_encoding }}
+          EPOCHS: ${{ inputs.mode == 'smoke' && '3' || inputs.epochs }}
+          HIDDEN_DIM: ${{ inputs.mode == 'smoke' && '64' || inputs.hidden_dim }}
+          PYTHONUNBUFFERED: "1"
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUTPUT_DIR"
+          python -u main.py 2>&1 | tee "$OUTPUT_DIR/stdout.log"
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: method-${{ matrix.seed }}-${{ matrix.method }}
+          path: outputs/method-${{ matrix.seed }}-${{ matrix.method }}/
+          if-no-files-found: warn
+          retention-days: 30
+
+  # ─────────────────────────────────────────────────────────────────────────
+  tabmeta:
+    name: Tabular + MetaEnsemble (seed ${{ matrix.seed }})
+    needs: [setup, elligat]
+    # run after elligat when it ran; also allow running standalone
+    if: ${{ always() && needs.setup.result == 'success' && (inputs.methods == 'all' || inputs.methods == 'tabmeta-only') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        seed: ${{ fromJSON(needs.setup.outputs.seeds) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install dependencies (CPU torch, pinned)
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          echo "torch==${TORCH_VERSION}" > constraints.txt
+          python -m pip install "torch==${TORCH_VERSION}" --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -c constraints.txt -r requirements.txt
+      - uses: actions/cache/restore@v4
+        with:
+          path: data/elliptic
+          key: ${{ env.DATA_CACHE_KEY }}
+          fail-on-cache-miss: true
+      - name: Locate dataset folder
+        id: data
+        run: |
+          set -euo pipefail
+          FEATS="$(find data/elliptic -name elliptic_txs_features.csv -print -quit)"
+          echo "path=$(cd "$(dirname "$FEATS")" && pwd)" >> "$GITHUB_OUTPUT"
+      - name: Download ElliGAT probabilities
+        uses: actions/download-artifact@v4
+        with:
+          name: method-${{ matrix.seed }}-ElliGAT
+          path: elligat-out
+        continue-on-error: true
+      - name: Run Tabular (+ Meta if ElliGAT probabilities exist)
+        env:
+          BITCOIN_DATA_PATH: ${{ steps.data.outputs.path }}
+          ELLIPTIC_CACHE_PATH: ${{ steps.data.outputs.path }}
+          ELLIGAT_PROBS_DIR: elligat-out
+          OUTPUT_DIR: outputs/method-${{ matrix.seed }}-TabMeta
+          SEEDS: ${{ matrix.seed }}
+          PYTHONUNBUFFERED: "1"
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUTPUT_DIR"
+          if [ -f "elligat-out/elligat_probs_seed${{ matrix.seed }}.npz" ]; then
+            export METHODS="Tabular,Meta"
+          else
+            echo "::warning::No ElliGAT probabilities for seed ${{ matrix.seed }} - running Tabular only"
+            export METHODS="Tabular"
+          fi
+          python -u main.py 2>&1 | tee "$OUTPUT_DIR/stdout.log"
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: method-${{ matrix.seed }}-TabMeta
+          path: outputs/method-${{ matrix.seed }}-TabMeta/
+          if-no-files-found: warn
+          retention-days: 30
+
+  # ─────────────────────────────────────────────────────────────────────────
+  aggregate:
+    name: Merge methods + aggregate seeds
+    needs: [elligat, gnn, tabmeta]
+    if: ${{ always() && !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: python -m pip install scipy
+      - name: Download all method results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: method-*
+          path: all-methods
+      - name: Merge methods into per-seed metrics.json
+        run: python scripts/merge_methods.py all-methods merged
+      - name: Mean ± std table
+        run: |
+          set -euo pipefail
+          python scripts/aggregate_results.py merged aggregate | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: results-aggregate
+          path: aggregate/
+          retention-days: 90
