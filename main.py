@@ -1,7 +1,7 @@
 """
 main.py
 =======
-Entry-point for the Bitcoin Fraud Detection pipeline 
+Entry-point for the Bitcoin Fraud Detection pipeline (ElliGAT-J journal version).
 
 Pipeline
 --------
@@ -73,7 +73,7 @@ from configs.config import (
     CONTRASTIVE_WEIGHT,
     LOSS_NAME, ASL_GAMMA_POS, ASL_GAMMA_NEG, ASL_CLIP,
     LOG_FILE, LOG_LEVEL,
-    PLP_EPOCHS, EXPLAIN_NODES, EXPLAIN_EPOCHS,
+    PLP_EPOCHS, EXPLAIN_NODES, EXPLAIN_EPOCHS, EDGE_ENCODING,
     DATASET, PROJECT_DATA_PATH, ELLIPTIC_CACHE_PATH,
     OUTPUT_DIR, BEST_MODEL_PATH, RESULTS_PLOT_PATH, METRICS_JSON_PATH,
 )
@@ -228,12 +228,12 @@ for seed in SEEDS:
     if want("ElliGAT"):
         print("\n  [ElliGAT — 4-layer GATv2 + temporal edges + heterophily]")
         ellgat = ElliGAT(
-            in_dim=in_dim,
-            hidden_dim=HIDDEN_DIM,
-            num_layers=NUM_GAT_LAYERS,
+            in_channels=in_dim,
+            hidden_channels=HIDDEN_DIM,
             heads=NUM_HEADS,
             dropout=DROPOUT,
             edge_dim=EDGE_DIM,
+            edge_encoding=EDGE_ENCODING,
         ).to(device)
 
         print("    Phase 1: Self-supervised pre-training …")
