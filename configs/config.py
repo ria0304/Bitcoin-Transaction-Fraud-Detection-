@@ -86,6 +86,11 @@ ASL_GAMMA_POS = float(os.environ.get("ASL_GAMMA_POS", 0.0))
 ASL_GAMMA_NEG = float(os.environ.get("ASL_GAMMA_NEG", 4.0))
 ASL_CLIP      = float(os.environ.get("ASL_CLIP", 0.05))
 
+# ─── Post-hoc stages (PLP + GNNExplainer); env-overridable so CI smoke runs are fast ─
+PLP_EPOCHS      = _env("PLP_EPOCHS", 50, int)
+EXPLAIN_NODES   = _env("EXPLAIN_NODES", 30, int)
+EXPLAIN_EPOCHS  = _env("EXPLAIN_EPOCHS", 150, int)
+
 # ─── Outputs ──────────────────────────────────────────────────────────────────
 OUTPUT_DIR          = os.environ.get("OUTPUT_DIR", "outputs")
 BEST_MODEL_PATH     = os.path.join(OUTPUT_DIR, "best_model.pt")
