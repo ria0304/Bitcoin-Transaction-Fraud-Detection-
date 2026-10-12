@@ -1,0 +1,9 @@
+run_number : 7
+mode       : full
+methods    : tabmeta-only
+seeds      : 42,123,2024,17,99
+loss       : asymmetric
+edge_enc   : sinusoidal
+epochs     : 300
+hidden_dim : 128
+commit     : 86a7a5a73977808d2179fbc4157579bcc6aef08c

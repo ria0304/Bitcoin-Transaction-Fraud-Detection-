@@ -1,0 +1,2 @@
+2026-10-11 18:43:42 | INFO    | Novelty: ElliGAT-ASL loss=asymmetric gamma_pos=0.0 gamma_neg=4.0
+2026-10-11 18:44:12 | INFO    | Saved summary → outputs/method-123-TabMeta/run_summary.txt

@@ -1,0 +1,36 @@
+ElliGAT-J (journal) novelty run
+loss=asymmetric  seeds=[123]  methods=['Tabular']
+============================================================
+
+
+MLP
+  ROC-AUC: 0.9756 +/- 0.0000
+  F1: 0.8166 +/- 0.0000
+  MCC: 0.8082 +/- 0.0000
+  Balanced Acc: 0.8667 +/- 0.0000
+  Precision: 0.9120 +/- 0.0000
+  Recall: 0.7392 +/- 0.0000
+
+XGBoost
+  ROC-AUC: 0.9890 +/- 0.0000
+  F1: 0.8252 +/- 0.0000
+  MCC: 0.8108 +/- 0.0000
+  Balanced Acc: 0.9047 +/- 0.0000
+  Precision: 0.8267 +/- 0.0000
+  Recall: 0.8236 +/- 0.0000
+
+LightGBM
+  ROC-AUC: 0.9920 +/- 0.0000
+  F1: 0.8754 +/- 0.0000
+  MCC: 0.8710 +/- 0.0000
+  Balanced Acc: 0.8977 +/- 0.0000
+  Precision: 0.9703 +/- 0.0000
+  Recall: 0.7974 +/- 0.0000
+
+RandomForest
+  ROC-AUC: 0.9890 +/- 0.0000
+  F1: 0.8478 +/- 0.0000
+  MCC: 0.8448 +/- 0.0000
+  Balanced Acc: 0.8752 +/- 0.0000
+  Precision: 0.9709 +/- 0.0000
+  Recall: 0.7523 +/- 0.0000

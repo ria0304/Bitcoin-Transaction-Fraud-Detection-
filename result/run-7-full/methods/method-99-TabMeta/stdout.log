@@ -1,0 +1,93 @@
+2026-10-11 18:44:01 | INFO    | Novelty: ElliGAT-ASL loss=asymmetric gamma_pos=0.0 gamma_neg=4.0
+
+============================================================
+  Bitcoin Fraud Detection — ElliGAT
+  Device : cpu
+  Output : outputs/method-99-TabMeta
+============================================================
+
+Step 1: Loading Elliptic Bitcoin dataset …
+  [check] found dataset at: /home/runner/work/Bitcoin-Transaction-Fraud-Detection-/Bitcoin-Transaction-Fraud-Detection-/data/elliptic/elliptic_bitcoin_dataset
+  Path: /home/runner/work/Bitcoin-Transaction-Fraud-Detection-/Bitcoin-Transaction-Fraud-Detection-/data/elliptic/elliptic_bitcoin_dataset
+  Loaded edges: 234355 directed → 468710 undirected
+  [Elliptic] 203,769 total | 46,564 labelled | Fraud: 0.0976
+
+Step 2: Engineering velocity features …
+
+Step 3: Chronological train/val/test split (70/15/15) …
+  Train: 32,594  Val: 6,984  Test: 6,986
+  Tabular features: 172 (7 velocity + 165 raw)
+  Class balance — Fraud: 3753 (11.514%)
+
+Step 4: Building Bitcoin transaction graph …
+  Nodes: 203,769  Edges: 468,710  Features/node: 172
+  Methods to run: ['Tabular']
+
+Step 5: Multi-seed experiments (1 seeds) …
+
+
+────────────────────────────────────────────────────────────
+  SEED 99
+────────────────────────────────────────────────────────────
+
+  [Tabular baselines]
+  MLP             AUC=0.9708 F1=0.8219 MCC=0.8226
+  XGBoost         AUC=0.9908 F1=0.8436 MCC=0.8329
+  LightGBM        AUC=0.9915 F1=0.8747 MCC=0.8699
+  RandomForest    AUC=0.9888 F1=0.8493 MCC=0.8470
+
+
+============================================================
+AGGREGATED RESULTS (mean ± std, 1 seed(s))
+============================================================
+
+  MLP
+    ROC-AUC         : 0.9708 ± 0.0000
+    F1              : 0.8219 ± 0.0000
+    MCC             : 0.8226 ± 0.0000
+    Balanced Acc    : 0.8523 ± 0.0000
+    Precision       : 0.9843 ± 0.0000
+    Recall          : 0.7054 ± 0.0000
+
+  XGBoost
+    ROC-AUC         : 0.9908 ± 0.0000
+    F1              : 0.8436 ± 0.0000
+    MCC             : 0.8329 ± 0.0000
+    Balanced Acc    : 0.8957 ± 0.0000
+    Precision       : 0.8931 ± 0.0000
+    Recall          : 0.7992 ± 0.0000
+
+  LightGBM
+    ROC-AUC         : 0.9915 ± 0.0000
+    F1              : 0.8747 ± 0.0000
+    MCC             : 0.8699 ± 0.0000
+    Balanced Acc    : 0.8985 ± 0.0000
+    Precision       : 0.9660 ± 0.0000
+    Recall          : 0.7992 ± 0.0000
+
+  RandomForest
+    ROC-AUC         : 0.9888 ± 0.0000
+    F1              : 0.8493 ± 0.0000
+    MCC             : 0.8470 ± 0.0000
+    Balanced Acc    : 0.8745 ± 0.0000
+    Precision       : 0.9780 ± 0.0000
+    Recall          : 0.7505 ± 0.0000
+
+
+======================================================================
+TABLE 1 — Full Comparison (mean ± std, n=1 seed(s))
+======================================================================
+Model                          AUC              F1             MCC        AURC
+────────────────────────────────────────────────────────────────────────────────
+MLP                  0.9708±0.0000   0.8219±0.0000   0.8226±0.0000         n/a
+RandomForest         0.9888±0.0000   0.8493±0.0000   0.8470±0.0000         n/a
+XGBoost              0.9908±0.0000   0.8436±0.0000   0.8329±0.0000         n/a
+LightGBM             0.9915±0.0000   0.8747±0.0000   0.8699±0.0000         n/a
+
+(ElliGAT not in METHODS → skipping MC-dropout / PLP / explainer / plots)
+  Saved metrics → outputs/method-99-TabMeta/metrics.json
+  Saved summary → outputs/method-99-TabMeta/run_summary.txt
+2026-10-11 18:45:03 | INFO    | Saved summary → outputs/method-99-TabMeta/run_summary.txt
+
+✅  Done. Methods run: ['Tabular']
+
