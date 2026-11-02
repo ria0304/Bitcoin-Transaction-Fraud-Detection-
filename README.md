@@ -11,7 +11,7 @@
 
 **Heterophily-aware graph attention network for illicit transaction detection.**
 
-ElliGAT is a GATv2-based model built for the [Elliptic Bitcoin Dataset](https://www.kaggle.com/datasets/ellipticco/elliptic-data-set), designed around three properties of the underlying blockchain graph that generic GNNs handle poorly: heterophily, class imbalance, and temporal drift.
+ElliGAT is a GATv2-based model built for the [Elliptic Bitcoin Dataset](https://www.kaggle.com/datasets/ellipticco/elliptic-data-set), designed around three properties of the underlying blockchain graph that generic GNNs handle poorly: heterophily, class imbalance, and temporal drift
 
 </div>
 
